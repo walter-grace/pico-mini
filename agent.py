@@ -3,7 +3,7 @@
 mac code — claude code for your Mac
 """
 
-import json, sys, os, time, subprocess, re, threading, queue
+import json, sys, os, time, subprocess, re, threading, queue, tty, termios
 import urllib.request, random
 
 from rich.console import Console, Group
@@ -298,29 +298,186 @@ COMMANDS = [
     ("/quit",        "Exit mac code"),
 ]
 
-def show_slash_menu(filter_text=""):
-    """Show Claude Code-style slash command menu."""
+def render_slash_menu(filter_text=""):
+    """Render slash menu as a Text object for live display."""
     matches = COMMANDS
-    if filter_text:
-        matches = [(c, d) for c, d in COMMANDS if filter_text in c.lower()]
+    if filter_text and filter_text != "/":
+        matches = [(c, d) for c, d in COMMANDS if c.startswith(filter_text)]
 
-    if not matches:
-        console.print("  [dim]no matching commands[/]\n")
-        return None
-
-    console.print()
-    for i, (cmd, desc) in enumerate(matches):
-        line = Text()
-        line.append("  ")
-        # Highlight the command name
-        line.append(cmd, style="bold bright_cyan")
-        # Pad to align descriptions
+    out = Text()
+    for cmd, desc in matches:
+        out.append("  ")
+        out.append(cmd, style="bold bright_cyan")
         pad = " " * (14 - len(cmd))
-        line.append(pad)
-        line.append(desc, style="dim")
-        console.print(line)
-    console.print()
-    return matches
+        out.append(pad)
+        out.append(desc, style="dim")
+        out.append("\n")
+    return out, matches
+
+def read_input(prompt_text):
+    """Read input with live slash command menu — appears instantly on /."""
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    buf = ""
+
+    try:
+        tty.setcbreak(fd)
+        # Print prompt
+        sys.stdout.write(prompt_text)
+        sys.stdout.flush()
+
+        menu_showing = False
+        menu_lines = 0
+
+        while True:
+            ch = sys.stdin.read(1)
+
+            # Enter — submit
+            if ch in ("\r", "\n"):
+                # Clear menu if showing
+                if menu_showing:
+                    # Move up and clear menu lines
+                    for _ in range(menu_lines):
+                        sys.stdout.write("\033[A\033[2K")
+                    sys.stdout.flush()
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return buf
+
+            # Ctrl-C / Ctrl-D
+            elif ch == "\x03" or ch == "\x04":
+                if menu_showing:
+                    for _ in range(menu_lines):
+                        sys.stdout.write("\033[A\033[2K")
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                raise KeyboardInterrupt
+
+            # Backspace
+            elif ch in ("\x7f", "\x08"):
+                if buf:
+                    buf = buf[:-1]
+                    # Erase character on screen
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+
+                    # Update or hide menu
+                    if buf.startswith("/"):
+                        # Clear old menu
+                        if menu_showing:
+                            # Save cursor, clear menu below, restore
+                            sys.stdout.write("\033[s")  # save cursor
+                            for _ in range(menu_lines):
+                                sys.stdout.write("\n\033[2K")
+                            # Move back up
+                            for _ in range(menu_lines):
+                                sys.stdout.write("\033[A")
+                            sys.stdout.write("\033[u")  # restore cursor
+                            sys.stdout.flush()
+
+                        menu_text, matches = render_slash_menu(buf)
+                        menu_lines = len(matches)
+                        if matches:
+                            # Print menu below current line
+                            sys.stdout.write("\033[s")  # save cursor
+                            sys.stdout.write("\n")
+                            rendered = menu_text.plain
+                            sys.stdout.write(rendered)
+                            sys.stdout.write("\033[u")  # restore cursor
+                            sys.stdout.flush()
+                            menu_showing = True
+                        else:
+                            menu_showing = False
+                    else:
+                        # No longer a slash command — hide menu
+                        if menu_showing:
+                            sys.stdout.write("\033[s")
+                            for _ in range(menu_lines):
+                                sys.stdout.write("\n\033[2K")
+                            for _ in range(menu_lines):
+                                sys.stdout.write("\033[A")
+                            sys.stdout.write("\033[u")
+                            sys.stdout.flush()
+                            menu_showing = False
+                            menu_lines = 0
+
+            # Tab — autocomplete first match
+            elif ch == "\t":
+                if buf.startswith("/") and menu_showing:
+                    _, matches = render_slash_menu(buf)
+                    if len(matches) == 1:
+                        # Complete the command
+                        completed = matches[0][0]
+                        # Clear what we typed, write the completed command
+                        for _ in range(len(buf)):
+                            sys.stdout.write("\b \b")
+                        buf = completed + " "
+                        sys.stdout.write(buf)
+                        sys.stdout.flush()
+
+                        # Clear menu
+                        if menu_showing:
+                            sys.stdout.write("\033[s")
+                            for _ in range(menu_lines):
+                                sys.stdout.write("\n\033[2K")
+                            for _ in range(menu_lines):
+                                sys.stdout.write("\033[A")
+                            sys.stdout.write("\033[u")
+                            sys.stdout.flush()
+                            menu_showing = False
+                            menu_lines = 0
+
+            # Escape sequences (arrow keys etc) — ignore
+            elif ch == "\x1b":
+                # Read and discard escape sequence
+                sys.stdin.read(1)
+                sys.stdin.read(1)
+
+            # Normal character
+            else:
+                buf += ch
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+
+                # Check if we should show/update slash menu
+                if buf.startswith("/"):
+                    # Clear old menu if showing
+                    if menu_showing:
+                        sys.stdout.write("\033[s")
+                        for _ in range(menu_lines):
+                            sys.stdout.write("\n\033[2K")
+                        for _ in range(menu_lines):
+                            sys.stdout.write("\033[A")
+                        sys.stdout.write("\033[u")
+                        sys.stdout.flush()
+
+                    menu_text, matches = render_slash_menu(buf)
+                    menu_lines = len(matches)
+                    if matches:
+                        sys.stdout.write("\033[s")  # save cursor
+                        sys.stdout.write("\n")
+                        rendered = menu_text.plain
+                        sys.stdout.write(rendered)
+                        sys.stdout.write("\033[u")  # restore cursor
+                        sys.stdout.flush()
+                        menu_showing = True
+                    else:
+                        menu_showing = False
+                        menu_lines = 0
+                else:
+                    if menu_showing:
+                        sys.stdout.write("\033[s")
+                        for _ in range(menu_lines):
+                            sys.stdout.write("\n\033[2K")
+                        for _ in range(menu_lines):
+                            sys.stdout.write("\033[A")
+                        sys.stdout.write("\033[u")
+                        sys.stdout.flush()
+                        menu_showing = False
+                        menu_lines = 0
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 # ── main ───────────────────────────────────────────
 def main():
@@ -339,8 +496,8 @@ def main():
     while True:
         try:
             tag = "agent" if use_agent else "raw"
-            console.print(f"  [dim]{tag}[/] [bold bright_yellow]>[/] ", end="")
-            user_input = input()
+            prompt = f"  \033[2m{tag}\033[0m \033[1;93m>\033[0m "
+            user_input = read_input(prompt)
         except (EOFError, KeyboardInterrupt):
             console.print()
             break
@@ -353,8 +510,7 @@ def main():
 
         # ── slash command handling ─────────────
         if cmd == "/":
-            # Show full command menu
-            show_slash_menu()
+            # Menu was already shown live, just continue
             continue
         elif cmd_lower.startswith("/") and not cmd_lower.startswith("/system "):
             # Check for partial match — typing "/st" shows "/stats" and "/system"
@@ -414,11 +570,11 @@ def main():
                 console.print(f"  [dim]compact mode {state}[/]\n")
                 continue
             elif exact in ("/help", "/?"):
-                show_slash_menu()
+                # Menu already shown live — just continue
                 continue
             else:
-                # Partial match — show filtered menu
-                matches = show_slash_menu(exact)
+                # Unknown command
+                console.print(f"  [dim]unknown command: {exact}[/]\n")
                 continue
 
         elif cmd_lower.startswith("/system "):
