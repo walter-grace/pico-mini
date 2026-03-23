@@ -289,12 +289,22 @@ def render_timeline(events):
 COMMANDS = [
     ("/agent",       "Switch to agent mode (tools + web search)"),
     ("/raw",         "Switch to raw mode (direct streaming, no tools)"),
+    ("/btw",         "Ask a side question without adding to conversation history"),
+    ("/loop",        "Run a prompt on a recurring interval — /loop 5m <prompt>"),
+    ("/branch",      "Save conversation checkpoint you can restore later"),
+    ("/restore",     "Restore last saved conversation checkpoint"),
+    ("/add-dir",     "Set working directory — /add-dir <path>"),
+    ("/save",        "Save conversation to a file — /save <filename>"),
+    ("/search",      "Quick web search — /search <query>"),
+    ("/bench",       "Run a quick speed benchmark"),
     ("/clear",       "Clear conversation and start fresh"),
     ("/stats",       "Show session statistics"),
     ("/model",       "Show current model info"),
     ("/tools",       "List available agent tools"),
     ("/system",      "Set system prompt — /system <message>"),
     ("/compact",     "Toggle compact output (no markdown rendering)"),
+    ("/stop",        "Stop a running /loop"),
+    ("/cost",        "Show estimated cost savings vs cloud APIs"),
     ("/quit",        "Exit mac code"),
 ]
 
@@ -325,6 +335,10 @@ def main():
     session_id = f"mc-{int(time.time())}"
     use_agent = True
     compact_mode = False
+    work_dir = os.getcwd()
+    branch_save = None  # saved conversation checkpoint
+    loop_thread = None
+    loop_running = False
 
     while True:
         try:
@@ -402,6 +416,57 @@ def main():
                 state = "on" if compact_mode else "off"
                 console.print(f"  [dim]compact mode {state}[/]\n")
                 continue
+
+            elif exact == "/branch":
+                branch_save = [m.copy() for m in messages]
+                console.print(f"  [dim]conversation saved ({len(messages)} messages). use /restore to go back.[/]\n")
+                continue
+
+            elif exact == "/restore":
+                if branch_save is not None:
+                    messages = [m.copy() for m in branch_save]
+                    console.print(f"  [dim]restored to checkpoint ({len(messages)} messages)[/]\n")
+                else:
+                    console.print("  [dim]no checkpoint saved. use /branch first.[/]\n")
+                continue
+
+            elif exact == "/bench":
+                console.print("  [dim]running speed benchmark...[/]")
+                try:
+                    payload = json.dumps({
+                        "model": "local",
+                        "messages": [{"role": "user", "content": "Count from 1 to 50, one number per line."}],
+                        "max_tokens": 300, "temperature": 0.1,
+                    }).encode()
+                    req = urllib.request.Request(
+                        f"{SERVER}/v1/chat/completions", data=payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    bstart = time.time()
+                    with urllib.request.urlopen(req, timeout=60) as resp:
+                        d = json.loads(resp.read())
+                    belapsed = time.time() - bstart
+                    t = d.get("timings", {})
+                    u = d.get("usage", {})
+                    gen_speed = t.get("predicted_per_second", 0)
+                    prompt_speed = t.get("prompt_per_second", 0)
+                    tokens = u.get("completion_tokens", 0)
+                    console.print(f"  [bold bright_green]{gen_speed:.1f} tok/s[/] generation")
+                    console.print(f"  [bold bright_green]{prompt_speed:.1f} tok/s[/] prompt processing")
+                    console.print(f"  [dim]{tokens} tokens in {belapsed:.1f}s[/]\n")
+                except Exception as e:
+                    console.print(f"  [bold red]benchmark failed: {e}[/]\n")
+                continue
+
+            elif exact == "/cost":
+                cloud_rate = 0.34  # $/hr RunPod equivalent
+                hours = session_time / 3600 if session_time > 0 else 0
+                saved = cloud_rate * max(hours, 1/60)
+                console.print(f"  [bold bright_green]$0.00[/] spent locally")
+                console.print(f"  [dim]~${saved:.4f} would have cost on cloud GPU (${cloud_rate}/hr)[/]")
+                console.print(f"  [dim]session: {session_time:.0f}s · {session_tokens:,} tokens[/]\n")
+                continue
+
             elif exact in ("/help", "/?"):
                 show_slash_menu()
                 continue
@@ -410,6 +475,7 @@ def main():
                 show_slash_menu(exact)
                 continue
 
+        # ── commands with arguments ────────────
         elif cmd_lower.startswith("/system "):
             sys_msg = cmd[8:].strip()
             if messages and messages[0]["role"] == "system":
@@ -417,6 +483,160 @@ def main():
             else:
                 messages.insert(0, {"role": "system", "content": sys_msg})
             console.print(f"  [dim italic]system: {sys_msg[:80]}[/]\n")
+            continue
+
+        elif cmd_lower.startswith("/btw "):
+            # Side question — don't add to conversation history
+            side_q = cmd[5:].strip()
+            if not side_q:
+                console.print("  [dim]/btw <question>[/]\n")
+                continue
+            console.print()
+            if use_agent:
+                start = time.time()
+                # Use a separate session so it doesn't pollute main conversation
+                response, events = picoclaw_call_live(side_q, session=f"btw-{int(time.time())}")
+                elapsed = time.time() - start
+                if response:
+                    console.print(f"  [dim italic](side answer)[/]")
+                    for line in response.split("\n"):
+                        console.print(f"  {line}")
+                    console.print()
+                    tokens_est = len(response.split())
+                    render_speed(tokens_est, elapsed)
+                    session_tokens += tokens_est
+                    session_time += elapsed
+            else:
+                side_msgs = [{"role": "user", "content": side_q}]
+                try:
+                    payload = json.dumps({
+                        "model": "local", "messages": side_msgs,
+                        "max_tokens": 2000, "temperature": 0.7,
+                    }).encode()
+                    req = urllib.request.Request(
+                        f"{SERVER}/v1/chat/completions", data=payload,
+                        headers={"Content-Type": "application/json"},
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        d = json.loads(resp.read())
+                    content = d["choices"][0]["message"]["content"]
+                    console.print(f"  [dim italic](side answer)[/]")
+                    for line in content.split("\n"):
+                        console.print(f"  {line}")
+                except Exception as e:
+                    console.print(f"  [bold red]{e}[/]")
+            console.print()
+            continue
+
+        elif cmd_lower.startswith("/add-dir "):
+            new_dir = os.path.expanduser(cmd[9:].strip())
+            if os.path.isdir(new_dir):
+                work_dir = new_dir
+                os.chdir(work_dir)
+                console.print(f"  [dim]working directory: {work_dir}[/]\n")
+            else:
+                console.print(f"  [bold red]not a directory: {new_dir}[/]\n")
+            continue
+
+        elif cmd_lower.startswith("/save "):
+            filename = cmd[6:].strip()
+            if not filename:
+                filename = f"conversation-{int(time.time())}.json"
+            try:
+                save_path = os.path.join(work_dir, filename)
+                with open(save_path, "w") as f:
+                    json.dump({
+                        "messages": messages,
+                        "session_id": session_id,
+                        "tokens": session_tokens,
+                        "time": session_time,
+                        "turns": session_turns,
+                    }, f, indent=2)
+                console.print(f"  [dim]saved to {save_path}[/]\n")
+            except Exception as e:
+                console.print(f"  [bold red]{e}[/]\n")
+            continue
+
+        elif cmd_lower.startswith("/search "):
+            query = cmd[8:].strip()
+            if not query:
+                console.print("  [dim]/search <query>[/]\n")
+                continue
+            console.print()
+            start = time.time()
+            response, events = picoclaw_call_live(
+                f"Search the web for: {query}. Give a brief summary of the top results.",
+                session=f"search-{int(time.time())}"
+            )
+            elapsed = time.time() - start
+            if response:
+                for line in response.split("\n"):
+                    console.print(f"  {line}")
+                console.print()
+                render_speed(len(response.split()), elapsed)
+                session_tokens += len(response.split())
+                session_time += elapsed
+            console.print()
+            continue
+
+        elif cmd_lower.startswith("/loop "):
+            # Parse: /loop 5m <prompt>
+            parts = cmd[6:].strip().split(None, 1)
+            if len(parts) < 2:
+                console.print("  [dim]/loop <interval> <prompt>  — e.g. /loop 5m check server status[/]\n")
+                continue
+
+            interval_str, loop_prompt = parts
+            # Parse interval
+            try:
+                if interval_str.endswith("m"):
+                    interval_sec = int(interval_str[:-1]) * 60
+                elif interval_str.endswith("s"):
+                    interval_sec = int(interval_str[:-1])
+                elif interval_str.endswith("h"):
+                    interval_sec = int(interval_str[:-1]) * 3600
+                else:
+                    interval_sec = int(interval_str) * 60  # default minutes
+            except ValueError:
+                console.print(f"  [bold red]invalid interval: {interval_str}[/]\n")
+                continue
+
+            if loop_running:
+                loop_running = False
+                console.print("  [dim]stopped previous loop[/]")
+                time.sleep(1)
+
+            loop_running = True
+            console.print(f"  [dim]looping every {interval_sec}s: {loop_prompt}[/]")
+            console.print(f"  [dim]type /stop to cancel[/]\n")
+
+            def run_loop(prompt, interval, sid):
+                nonlocal loop_running, session_tokens, session_time
+                while loop_running:
+                    time.sleep(interval)
+                    if not loop_running:
+                        break
+                    console.print(f"\n  [dim italic]loop: running '{prompt[:40]}...'[/]")
+                    resp, _ = picoclaw_call_live(prompt, session=sid)
+                    if resp:
+                        for line in resp.split("\n"):
+                            console.print(f"  {line}")
+                    console.print()
+
+            loop_thread = threading.Thread(
+                target=run_loop,
+                args=(loop_prompt, interval_sec, f"loop-{session_id}"),
+                daemon=True
+            )
+            loop_thread.start()
+            continue
+
+        elif cmd_lower == "/stop":
+            if loop_running:
+                loop_running = False
+                console.print("  [dim]loop stopped[/]\n")
+            else:
+                console.print("  [dim]no loop running[/]\n")
             continue
 
         console.print()
