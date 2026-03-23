@@ -250,7 +250,7 @@ def print_banner(model_name, model_detail):
 
     console.print()
     console.print(Rule(style="dim"))
-    console.print()
+    console.print("  [dim]type [bold bright_cyan]/[/bold bright_cyan] to see all commands[/]\n")
 
 # ── render helpers ─────────────────────────────────
 def render_speed(tokens, elapsed):
@@ -286,24 +286,41 @@ def render_timeline(events):
     console.print(t)
 
 # ── commands ───────────────────────────────────────
-def print_help():
-    cmds = [
-        ("/agent", "Agent mode — tools enabled (default)"),
-        ("/raw", "Raw mode — direct streaming, no tools"),
-        ("/clear", "Clear conversation"),
-        ("/stats", "Session statistics"),
-        ("/model", "Current model info"),
-        ("/tools", "List available tools"),
-        ("/system <msg>", "Set system prompt"),
-        ("/quit", "Exit"),
-    ]
-    t = Table(show_header=False, box=None, padding=(0, 2))
-    t.add_column(style="bold bright_cyan", width=16)
-    t.add_column(style="dim")
-    for cmd, desc in cmds:
-        t.add_row(cmd, desc)
-    console.print(t)
+COMMANDS = [
+    ("/agent",       "Switch to agent mode (tools + web search)"),
+    ("/raw",         "Switch to raw mode (direct streaming, no tools)"),
+    ("/clear",       "Clear conversation and start fresh"),
+    ("/stats",       "Show session statistics"),
+    ("/model",       "Show current model info"),
+    ("/tools",       "List available agent tools"),
+    ("/system",      "Set system prompt — /system <message>"),
+    ("/compact",     "Toggle compact output (no markdown rendering)"),
+    ("/quit",        "Exit mac code"),
+]
+
+def show_slash_menu(filter_text=""):
+    """Show Claude Code-style slash command menu."""
+    matches = COMMANDS
+    if filter_text:
+        matches = [(c, d) for c, d in COMMANDS if filter_text in c.lower()]
+
+    if not matches:
+        console.print("  [dim]no matching commands[/]\n")
+        return None
+
     console.print()
+    for i, (cmd, desc) in enumerate(matches):
+        line = Text()
+        line.append("  ")
+        # Highlight the command name
+        line.append(cmd, style="bold bright_cyan")
+        # Pad to align descriptions
+        pad = " " * (14 - len(cmd))
+        line.append(pad)
+        line.append(desc, style="dim")
+        console.print(line)
+    console.print()
+    return matches
 
 # ── main ───────────────────────────────────────────
 def main():
@@ -317,6 +334,7 @@ def main():
     session_turns = 0
     session_id = f"mc-{int(time.time())}"
     use_agent = True
+    compact_mode = False
 
     while True:
         try:
@@ -330,61 +348,81 @@ def main():
         if not user_input.strip():
             continue
 
-        cmd = user_input.strip().lower()
+        cmd = user_input.strip()
+        cmd_lower = cmd.lower()
 
-        if cmd in ("/quit", "/exit", "/q"):
-            break
-        elif cmd == "/clear":
-            messages.clear()
-            session_id = f"mc-{int(time.time())}"
-            console.clear()
-            print_banner(model_name, model_detail)
-            console.print("  [dim]cleared.[/]\n")
+        # ── slash command handling ─────────────
+        if cmd == "/":
+            # Show full command menu
+            show_slash_menu()
             continue
-        elif cmd == "/stats":
-            avg = session_tokens / session_time if session_time > 0 else 0
-            t = Table(show_header=False, box=None, padding=(0, 1))
-            t.add_column(style="bold bright_cyan", width=12)
-            t.add_column()
-            t.add_row("turns", str(session_turns))
-            t.add_row("tokens", f"{session_tokens:,}")
-            t.add_row("time", f"{session_time:.1f}s")
-            t.add_row("avg speed", f"{avg:.1f} tok/s")
-            t.add_row("mode", tag)
-            console.print(t)
-            console.print()
-            continue
-        elif cmd == "/model":
-            model_name, model_detail = detect_model()
-            console.print(f"  [bold white]{model_name}[/]  [dim]{model_detail}[/]\n")
-            continue
-        elif cmd == "/tools":
-            for name, desc in [
-                ("web_search", "DuckDuckGo"), ("web_fetch", "read URLs"),
-                ("exec", "shell commands"), ("read_file", "local files"),
-                ("write_file", "create files"), ("edit_file", "modify files"),
-                ("list_dir", "browse dirs"), ("subagent", "spawn tasks"),
-            ]:
-                t = Text()
-                t.append("  ▸ ", style="bright_cyan")
-                t.append(name, style="bold bright_cyan")
-                t.append(f"  {desc}", style="dim")
+        elif cmd_lower.startswith("/") and not cmd_lower.startswith("/system "):
+            # Check for partial match — typing "/st" shows "/stats" and "/system"
+            exact = cmd_lower.split()[0]
+
+            if exact in ("/quit", "/exit", "/q"):
+                break
+            elif exact == "/clear":
+                messages.clear()
+                session_id = f"mc-{int(time.time())}"
+                console.clear()
+                print_banner(model_name, model_detail)
+                console.print("  [dim]cleared.[/]\n")
+                continue
+            elif exact == "/stats":
+                avg = session_tokens / session_time if session_time > 0 else 0
+                t = Table(show_header=False, box=None, padding=(0, 1))
+                t.add_column(style="bold bright_cyan", width=12)
+                t.add_column()
+                t.add_row("turns", str(session_turns))
+                t.add_row("tokens", f"{session_tokens:,}")
+                t.add_row("time", f"{session_time:.1f}s")
+                t.add_row("avg speed", f"{avg:.1f} tok/s")
+                t.add_row("mode", tag)
                 console.print(t)
-            console.print()
-            continue
-        elif cmd == "/agent":
-            use_agent = True
-            console.print("  [dim]agent mode (tools enabled)[/]\n")
-            continue
-        elif cmd == "/raw":
-            use_agent = False
-            console.print("  [dim]raw mode (streaming, no tools)[/]\n")
-            continue
-        elif cmd in ("/help", "/?"):
-            print_help()
-            continue
-        elif cmd.startswith("/system "):
-            sys_msg = user_input[8:].strip()
+                console.print()
+                continue
+            elif exact == "/model":
+                model_name, model_detail = detect_model()
+                console.print(f"  [bold white]{model_name}[/]  [dim]{model_detail}[/]\n")
+                continue
+            elif exact == "/tools":
+                for name, desc in [
+                    ("web_search", "DuckDuckGo"), ("web_fetch", "read URLs"),
+                    ("exec", "shell commands"), ("read_file", "local files"),
+                    ("write_file", "create files"), ("edit_file", "modify files"),
+                    ("list_dir", "browse dirs"), ("subagent", "spawn tasks"),
+                ]:
+                    t = Text()
+                    t.append("  ▸ ", style="bright_cyan")
+                    t.append(name, style="bold bright_cyan")
+                    t.append(f"  {desc}", style="dim")
+                    console.print(t)
+                console.print()
+                continue
+            elif exact == "/agent":
+                use_agent = True
+                console.print("  [dim]agent mode (tools enabled)[/]\n")
+                continue
+            elif exact == "/raw":
+                use_agent = False
+                console.print("  [dim]raw mode (streaming, no tools)[/]\n")
+                continue
+            elif exact == "/compact":
+                compact_mode = not compact_mode
+                state = "on" if compact_mode else "off"
+                console.print(f"  [dim]compact mode {state}[/]\n")
+                continue
+            elif exact in ("/help", "/?"):
+                show_slash_menu()
+                continue
+            else:
+                # Partial match — show filtered menu
+                matches = show_slash_menu(exact)
+                continue
+
+        elif cmd_lower.startswith("/system "):
+            sys_msg = cmd[8:].strip()
             if messages and messages[0]["role"] == "system":
                 messages[0]["content"] = sys_msg
             else:
@@ -406,7 +444,7 @@ def main():
                 console.print()
 
                 # Render response
-                if any(c in response for c in ["##", "**", "```", "- ", "1. ", "* "]):
+                if not compact_mode and any(c in response for c in ["##", "**", "```", "- ", "1. ", "* "]):
                     console.print(Padding(Markdown(response), (0, 2)))
                 else:
                     for line in response.split("\n"):
@@ -445,7 +483,7 @@ def main():
                             tokens += 1
 
                 elapsed = time.time() - start
-                if any(c in full for c in ["##", "**", "```", "- ", "1. "]):
+                if not compact_mode and any(c in full for c in ["##", "**", "```", "- ", "1. "]):
                     console.print("\n")
                     console.print(Padding(Markdown(full), (0, 2)))
                 else:
