@@ -261,52 +261,29 @@ def quick_search(query):
     # Step 1: LLM rewrites query into optimal search terms (~1s)
     try:
         search_query, _ = llm_call([
-            {"role": "system", "content": f"Today is {today}. Rewrite the user's question into a short, optimal web search query. Include today's date if time-sensitive. Output ONLY the search query string, nothing else."},
+            {"role": "system", "content": f"Today is {today}. Rewrite the user's question into an optimal web search query that will find current, specific data (not articles about announcements). Include 'today' or 'tonight' and the full date for time-sensitive queries. Add words like 'scores', 'results', 'live', or 'now' when looking for current data. Output ONLY the search query string, nothing else."},
             {"role": "user", "content": query},
         ], max_tokens=30, temperature=0.0)
         search_query = search_query.strip().strip('"\'')
     except Exception:
         search_query = query
 
-    # Step 2: DuckDuckGo search (~0.2s)
+    # Step 2: DuckDuckGo search — grab 10 results for better coverage (~0.3s)
     try:
-        results = DDGS().text(search_query, max_results=5)
+        results = DDGS().text(search_query, max_results=10)
     except Exception:
         return None
 
     if not results:
         return None
 
-    # Step 2b: Fetch the most relevant page for detailed content (~1-2s)
-    search_text = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
-    page_content = ""
-
-    try:
-        # Fetch the first result's URL for detailed data
-        best_url = results[0].get("href") or results[0].get("link", "")
-        if best_url:
-            req = urllib.request.Request(best_url, headers={
-                "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)"
-            })
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                raw = resp.read(8000).decode("utf-8", errors="ignore")
-                # Strip HTML tags for a rough text extraction
-                import re as _re
-                text = _re.sub(r'<[^>]+>', ' ', raw)
-                text = _re.sub(r'\s+', ' ', text).strip()
-                page_content = text[:3000]
-    except Exception:
-        pass  # page fetch failed, use snippets only
-
-    # Combine snippets + page content
-    context = f"Search snippets:\n{search_text}"
-    if page_content:
-        context += f"\n\nDetailed page content from {results[0]['title']}:\n{page_content}"
+    # Use snippets directly — they contain the actual data
+    context = "\n".join([f"- {r['title']}: {r['body']}" for r in results])
 
     # Step 3: LLM answers using results (~2-3s)
     content, timings = llm_call([
-        {"role": "system", "content": f"Today is {today}. Answer the user's question using the search results and page content below. Be specific, direct, and detailed. Use scores, dates, names, numbers, and facts. If you find the data, present it clearly."},
-        {"role": "user", "content": f"{context}\n\nQuestion: {query}"},
+        {"role": "system", "content": f"Today is {today}. Answer the user's question using the search results below. Be specific, direct, and detailed. Extract dates, times, scores, names, numbers, prices, and facts. Present them clearly."},
+        {"role": "user", "content": f"Search results:\n\n{context}\n\nQuestion: {query}"},
     ], max_tokens=1000)
 
     return content, timings.get("predicted_per_second", 0)
@@ -1134,10 +1111,8 @@ def main():
                         t = time.time() - start
                         if t < 2:
                             display.phase = "rewriting query"
-                        elif t < 4:
+                        elif t < 3:
                             display.phase = "searching the web"
-                        elif t < 6:
-                            display.phase = "reading results"
                         else:
                             display.phase = "generating answer"
                         live.update(display.render())
