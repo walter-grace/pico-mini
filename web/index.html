@@ -499,8 +499,7 @@ async function handleInput(text){
       resp.split('\n').forEach(line=>addLine('  '+line,'line-white'));
       addLine('');
       const tokens=resp.split(/\s+/).length;
-      const speed=(tokens/parseFloat(elapsed)).toFixed(1);
-      addHTML(`  <span style="color:#33ff33">${speed} tok/s</span>  <span style="color:#227722">·  ${tokens} tokens  ·  ${elapsed}s</span>`);
+      addHTML(`  <span style="color:#00dddd">▸ agent</span>  <span style="color:#227722">${elapsed}s total (search + inference)</span>`);
       sessionTurns++;sessionTokens+=tokens;
     }catch(e){
       hideLoading(iv);
