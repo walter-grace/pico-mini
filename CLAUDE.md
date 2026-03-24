@@ -70,7 +70,8 @@ For the 9B model (recommended):
 llama-server \
     --model ~/models/Qwen3.5-9B-Q4_K_M.gguf \
     --port 8000 --host 127.0.0.1 \
-    --flash-attn on --ctx-size 32768 \
+    --flash-attn on --ctx-size 65536 \
+    --cache-type-k q4_0 --cache-type-v q4_0 \
     --n-gpu-layers 99 --reasoning off -t 4
 ```
 
@@ -79,7 +80,8 @@ For the 35B MoE model:
 llama-server \
     --model ~/models/Qwen3.5-35B-A3B-UD-IQ2_M.gguf \
     --port 8000 --host 127.0.0.1 \
-    --flash-attn on --ctx-size 8192 \
+    --flash-attn on --ctx-size 12288 \
+    --cache-type-k q4_0 --cache-type-v q4_0 \
     --n-gpu-layers 99 --reasoning off -np 1 -t 4
 ```
 
