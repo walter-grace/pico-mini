@@ -80,11 +80,14 @@ def swap_model(target_key):
     time.sleep(3)
 
     # Start new server
-    cmd = (
-        f"llama-server --model {cfg['path']} --port 8000 --host 127.0.0.1 "
-        f"--ctx-size {cfg['ctx']} {cfg['flags']}"
-    )
-    subprocess.Popen(cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cmd_list = [
+        "llama-server",
+        "--model", cfg["path"],
+        "--port", "8000",
+        "--host", "127.0.0.1",
+        "--ctx-size", str(cfg["ctx"]),
+    ] + cfg["flags"].split()
+    subprocess.Popen(cmd_list, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     # Wait for ready
     for i in range(30):
