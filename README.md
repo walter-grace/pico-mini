@@ -22,19 +22,49 @@ We proved this works. Now we're open-sourcing the entire stack so anyone with a 
 
 ## How it works
 
-mac code uses a three-tier routing system that picks the fastest path for every query:
+### LLM-as-Router
 
-| Query type | What happens | Speed |
+Most AI agents use hardcoded rules or a separate framework to decide what to do. mac code uses **the LLM itself as the router**. Every message gets classified in ~1 second:
+
+```
+You: "find me videos on my desktop"
+ → LLM classifies: "shell"
+ → LLM generates: find ~/Desktop -type f \( -name "*.mp4" -o -name "*.mov" \)
+ → Executes command, feeds results back to LLM
+ → LLM presents results
+
+You: "who do the lakers play next?"
+ → LLM classifies: "search"
+ → LLM rewrites query: "Lakers schedule March 24, 2026"
+ → DuckDuckGo search + page fetch
+ → LLM answers with real data
+
+You: "explain quantum computing"
+ → LLM classifies: "chat"
+ → Streams directly from LLM
+```
+
+Three paths, all powered by the same model:
+
+| Intent | What happens | Speed |
 |---|---|---|
-| **Web search** (news, scores, weather, prices) | LLM rewrites query → DuckDuckGo → page fetch → LLM answers | **~8-20s** |
-| **File/exec** (read, write, run commands) | Routes through PicoClaw agent | ~4-10s |
-| **Everything else** (reasoning, coding, math) | Streams directly from LLM | **~2-3s** |
+| **search** | LLM rewrites query → DuckDuckGo → page fetch → LLM answers | **~8-20s** |
+| **shell** | LLM generates command → execute → LLM summarizes results | **~5-15s** |
+| **chat** | Streams directly from LLM | **~2-3s** |
 
-The web search pipeline:
-1. LLM rewrites your question into optimal search terms (~1s)
-2. DuckDuckGo search (~0.2s)
-3. Fetches the top result page for detailed content (~1-2s)
-4. LLM answers using search snippets + page data (~3-5s)
+### Why this matters
+
+**Because the LLM is the router, upgrading the model upgrades every capability simultaneously.** A smarter model generates better shell commands, writes better search queries, classifies intent more accurately, and gives better answers — without changing a single line of agent code.
+
+```
+Same agent.py on every Mac:
+
+  16GB Mac mini  →  9B model   →  good agent
+  48GB Mac Pro   →  35B model  →  great agent
+  192GB Studio   →  397B model →  frontier agent
+
+  Zero code changes. Just swap the model file.
+```
 
 ### Test results (10/10 passed)
 
@@ -216,39 +246,59 @@ Type `/` to see all commands:
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  mac code                  Python + Rich             │
-│  Three-tier routing:                                 │
-│    search → DuckDuckGo + LLM direct (~8s)           │
-│    files  → PicoClaw agent (when needed)            │
-│    chat   → stream from LLM (~2s)                   │
+│  mac code agent            Python + Rich             │
+│                                                      │
+│  ┌─────────────────────────────────────────────┐     │
+│  │  LLM-as-Router (1 fast classification call) │     │
+│  │  "search" / "shell" / "chat"                │     │
+│  └──────┬──────────┬──────────────┬────────────┘     │
+│         │          │              │                   │
+│     search      shell          chat                  │
+│    DuckDuckGo   LLM→command   stream                 │
+│    + page fetch  execute      direct                 │
+│    + LLM answer  LLM summary                        │
+│         │          │              │                   │
+│  ┌──────┴──────────┴──────────────┴────────────┐     │
+│  │  llama.cpp (Metal GPU, localhost:8000)       │     │
+│  │  Any GGUF model — 9B, 35B, 397B, 1T         │     │
+│  └─────────────────────────────────────────────┘     │
+│                                                      │
+│  ┌─────────────────────────────────────────────┐     │
+│  │  Apple Silicon — Unified Memory + SSD       │     │
+│  │  Metal GPU + flash paging for large models  │     │
+│  └─────────────────────────────────────────────┘     │
 ├──────────────────────────────────────────────────────┤
-│  llama.cpp                 C++ + Metal GPU           │
-│  OpenAI-compatible API @ localhost:8000              │
-├──────────────────────────────────────────────────────┤
-│  Qwen3.5-9B (Q4_K_M)      Qwen3.5-35B-A3B (IQ2_M)  │
-│  32K ctx, 16 tok/s         8K ctx, 57 tok/s         │
-├──────────────────────────────────────────────────────┤
-│  Apple Silicon             Unified Memory + SSD      │
-│  Metal GPU + flash paging                            │
+│  PicoClaw (optional plugin layer)                    │
+│  Telegram · Discord · Slack · WhatsApp · 17+ apps   │
 └──────────────────────────────────────────────────────┘
 ```
 
-### Web search pipeline
+### Example flows
 
+**"find me videos on my desktop":**
 ```
-User: "who do the lakers play next?"
-  │
-  ├─ Step 1: LLM rewrites → "Lakers schedule March 24, 2026" (1s)
-  ├─ Step 2: DuckDuckGo search (0.2s)
-  ├─ Step 3: Fetch top result page for details (1-2s)
-  └─ Step 4: LLM answers with search context (3-5s)
-  │
-  Total: ~8s with real, accurate data
+LLM classifies → shell
+LLM generates  → find ~/Desktop -type f \( -name "*.mp4" -o -name "*.mov" \)
+Agent executes → [list of video files]
+LLM presents   → "Found 3 videos on your Desktop: ..."
+Total: ~8s
 ```
 
-### File operations
+**"who do the lakers play next?":**
+```
+LLM classifies → search
+LLM rewrites   → "Lakers schedule March 24, 2026"
+DuckDuckGo     → [search results + page content]
+LLM answers    → "The Lakers play the Pistons on Monday March 24"
+Total: ~10s
+```
 
-For file read/write/exec, mac code routes through [PicoClaw](https://github.com/sipeed/picoclaw) (Go agent framework). PicoClaw is only used for file operations — web search bypasses it for speed.
+**"explain quantum computing":**
+```
+LLM classifies → chat
+Streams directly from LLM
+Total: ~2-3s
+```
 
 ---
 
@@ -267,16 +317,64 @@ For file read/write/exec, mac code routes through [PicoClaw](https://github.com/
 
 ---
 
-## Scaling
+## Scaling — Same Agent, Bigger Brain
 
-| Mac | RAM | What you can run | Est. Speed |
-|---|---|---|---|
-| Any Mac (8GB) | 8 GB | 9B only, 4K context | ~15 tok/s |
-| **Mac mini M4** | **16 GB** | **9B (32K ctx) + 35B MoE (8K ctx, SSD paging)** | **16-57 tok/s** |
-| Mac mini M4 Pro | 48 GB | 35B MoE at Q4_K_M, 32K context | ~40+ tok/s |
-| Mac Studio M4 Max | 128 GB | Qwen3.5-397B-A17B (frontier MoE) | ~10-20 tok/s |
-| Mac Studio M4 Ultra | 192 GB | Qwen3.5-397B-A17B at Q4_K_M | ~15-30 tok/s |
-| Mac Pro M4 Ultra | 512 GB | **Kimi K2.5 (1T MoE, 32B active)** | ~5-15 tok/s |
+The agent code never changes. You just swap the model file and everything gets smarter:
+
+| Mac | RAM | Model | Agent Quality | Speed |
+|---|---|---|---|---|
+| Any Mac | 8 GB | Qwen3.5-9B (4K ctx) | Good — chat + basic tools | ~15 tok/s |
+| **Mac mini M4** | **16 GB** | **Qwen3.5-9B (32K ctx)** | **Good — search, shell, chat** | **~16 tok/s** |
+| Mac mini M4 | 16 GB | Qwen3.5-35B MoE (8K ctx, SSD paging) | Better reasoning, no tools | ~57 tok/s |
+| Mac mini M4 Pro | 48 GB | Qwen3.5-35B MoE Q4_K_M (32K ctx) | **Great — tools work at higher quant** | ~40+ tok/s |
+| Mac mini M4 Pro | 48 GB | Both models (speculative decoding) | Great + fast | ~60-90 tok/s |
+| Mac Studio M4 Max | 128 GB | Qwen3.5-397B-A17B (frontier MoE) | **Frontier — 17B active/token** | ~10-20 tok/s |
+| Mac Studio M4 Ultra | 192 GB | Qwen3.5-397B-A17B Q4_K_M | Frontier + quality | ~15-30 tok/s |
+| Mac Pro M4 Ultra | 512 GB | Kimi K2.5 (1T MoE, 32B active) | **Beyond frontier** | ~5-15 tok/s |
+
+### What more RAM unlocks
+
+**16 GB (what we proved):**
+- 9B handles all agent tasks — LLM classifies intent, generates shell commands, rewrites search queries
+- 35B available for manual reasoning (faster but no tool calling at IQ2 quantization)
+
+**48 GB (next step):**
+- 35B at Q4_K_M — tool calling works because higher quantization preserves instruction following
+- Speculative decoding — 9B drafts tokens, 35B verifies, 2-3x speed boost
+- 32K+ context on the 35B — long conversations and complex file analysis
+
+**128-192 GB (frontier):**
+- 397B-A17B — the same MoE architecture, 17B active per token
+- The LLM-as-router gets dramatically smarter — better command generation, better search queries, better intent classification
+- Same `python3 agent.py`, same slash commands, same web search pipeline
+
+**512 GB (the 1T frontier — Kimi K2.5):**
+- **Kimi K2.5** — 1 trillion parameters, MoE with 32B active per token
+- Currently requires 8x H100 GPUs (~$25/hr in the cloud)
+- A Mac Pro with 512 GB unified memory could run a Q2 quantized version (~300 GB on disk)
+- The active 32B parameters stay hot in RAM; the other 968B page from SSD
+- Same `python3 agent.py` — the LLM-as-router would operate at GPT-4+ level
+- Intent classification becomes near-perfect, shell commands are expert-level, search queries are optimally crafted
+- **What costs $25/hr on cloud GPUs today runs on a desk for $0/hr**
+
+**The key insight:** because the LLM is the router, planner, and executor, every capability scales with the model. A 1T model on a Mac Pro would generate perfect shell commands, write optimal search queries, and give expert-level answers — all running the same agent.py that works on a $600 Mac mini today. Zero code changes. Just swap the model file.
+
+### Plugin layer (optional)
+
+For messaging app integration, [PicoClaw](https://github.com/sipeed/picoclaw) connects mac code to 17+ platforms:
+
+```
+┌─────────────────────────────────────────┐
+│  mac code (core agent)                  │
+│  Python · LLM router · search · shell   │
+├─────────────────────────────────────────┤
+│  PicoClaw (optional plugin layer)       │
+│  Telegram · Discord · Slack · WhatsApp  │
+│  WeChat · Matrix · IRC · Line · QQ      │
+└─────────────────────────────────────────┘
+```
+
+Your local LLM answering Telegram messages, responding in Discord, monitoring Slack — all at $0/month.
 
 ---
 
