@@ -62,16 +62,123 @@ def needs_tools(message):
     lower = message.lower()
     return any(kw in lower for kw in TOOL_KEYWORDS)
 
-# File operations still need PicoClaw
+# File/exec keywords
 FILE_KEYWORDS = ["read file", "write file", "write a file", "create file", "create a file",
                   "create a new", "save file", "save to ", "save this",
                   "list files", "list dir", "execute", "run ", "edit file",
-                  "open file", "delete file", "mkdir", "make dir"]
+                  "open file", "delete file", "mkdir", "make dir",
+                  "show me the code", "look at", "what's in", "cat ",
+                  "ls ", "pwd", "cd "]
 
-def needs_picoclaw(message):
-    """Only use PicoClaw for file/exec operations. Web search is faster direct."""
+def needs_file_tools(message):
+    """Detect if a message needs file/exec operations."""
     lower = message.lower()
     return any(kw in lower for kw in FILE_KEYWORDS)
+
+def run_file_tool(query, work_dir="."):
+    """Execute file/exec operations directly in Python, feed results to LLM."""
+    import subprocess as sp
+    from datetime import datetime
+
+    lower = query.lower()
+    tool_output = ""
+    tool_name = ""
+
+    try:
+        # List directory
+        if any(kw in lower for kw in ["list files", "list dir", "ls ", "what's in"]):
+            # Extract path or use work_dir
+            path = work_dir
+            for token in query.split():
+                expanded = os.path.expanduser(token)
+                if os.path.isdir(expanded):
+                    path = expanded
+                    break
+            entries = os.listdir(path)
+            entries.sort()
+            tool_name = f"list_dir({path})"
+            tool_output = "\n".join(entries[:50])
+            if len(entries) > 50:
+                tool_output += f"\n... and {len(entries)-50} more"
+
+        # Read file
+        elif any(kw in lower for kw in ["read file", "show me", "look at", "cat ", "what's in"]):
+            # Find file path in the query
+            path = None
+            for token in query.split():
+                expanded = os.path.expanduser(token)
+                if os.path.isfile(expanded):
+                    path = expanded
+                    break
+                # Try with work_dir
+                joined = os.path.join(work_dir, token)
+                if os.path.isfile(joined):
+                    path = joined
+                    break
+            if path:
+                with open(path, "r", errors="ignore") as f:
+                    content = f.read(10000)
+                tool_name = f"read_file({path})"
+                tool_output = content
+            else:
+                tool_output = f"Could not find file in query: {query}"
+                tool_name = "read_file(not found)"
+
+        # Write file
+        elif any(kw in lower for kw in ["write file", "write a file", "create file", "create a file",
+                                          "create a new", "save file", "save to", "save this"]):
+            # LLM decides what to write
+            content, _ = llm_call([
+                {"role": "system", "content": "The user wants to create/write a file. Generate ONLY the file content. No explanations."},
+                {"role": "user", "content": query},
+            ], max_tokens=2000)
+
+            # Extract filename from query
+            filename = None
+            for token in query.split():
+                if "." in token and not token.startswith("http"):
+                    filename = token
+                    break
+            if not filename:
+                filename = "output.txt"
+
+            filepath = os.path.join(work_dir, filename)
+            with open(filepath, "w") as f:
+                f.write(content)
+            tool_name = f"write_file({filepath})"
+            tool_output = f"Written {len(content)} bytes to {filepath}"
+
+        # Execute command
+        elif any(kw in lower for kw in ["execute", "run "]):
+            # Extract command
+            cmd = query
+            for prefix in ["execute ", "run "]:
+                if lower.startswith(prefix):
+                    cmd = query[len(prefix):]
+                    break
+
+            result = sp.run(cmd, shell=True, capture_output=True, text=True,
+                          timeout=30, cwd=work_dir)
+            tool_name = f"exec({cmd.strip()[:40]})"
+            tool_output = result.stdout[:5000]
+            if result.stderr:
+                tool_output += f"\nSTDERR: {result.stderr[:1000]}"
+
+        else:
+            return None
+
+    except Exception as e:
+        tool_output = f"Error: {e}"
+        tool_name = "error"
+
+    # Feed tool output to LLM for final answer
+    today = datetime.now().strftime("%A, %B %d, %Y")
+    content, timings = llm_call([
+        {"role": "system", "content": f"Today is {today}. You executed a tool and got results. Summarize the results clearly for the user. If it's code, format it nicely."},
+        {"role": "user", "content": f"Tool: {tool_name}\nResult:\n{tool_output}\n\nOriginal question: {query}"},
+    ], max_tokens=1000)
+
+    return content, timings.get("predicted_per_second", 0), tool_name
 
 def llm_call(messages, max_tokens=300, temperature=0.1):
     """Single LLM call, returns content + timings."""
@@ -903,25 +1010,50 @@ def main():
                 pass
 
             # Now run the query
-            if use_tools and needs_picoclaw(user_input):
-                # File/exec operations → PicoClaw (slow but necessary)
-                picoclaw_response, events = picoclaw_call_live(user_input, session=session_id)
+            if use_tools and needs_file_tools(user_input):
+                # File/exec → fast Python tools (~2-5s)
+                display = WorkingDisplay()
+                display.phase = "running tool"
+                file_result = [None]
+
+                def do_file_tool():
+                    try:
+                        file_result[0] = run_file_tool(user_input, work_dir)
+                    except Exception:
+                        file_result[0] = None
+
+                file_thread = threading.Thread(target=do_file_tool, daemon=True)
+                file_thread.start()
+
+                with Live(display.render(), console=console, refresh_per_second=8, transient=True) as live:
+                    while file_thread.is_alive():
+                        display.frame += 1
+                        live.update(display.render())
+                        time.sleep(0.12)
+
+                file_thread.join(timeout=1)
+                result = file_result[0]
                 elapsed = time.time() - start
-                if picoclaw_response and "max_tool_iterations" not in picoclaw_response:
-                    render_timeline(events)
+
+                if result:
+                    response, speed, tool_name = result
                     console.print()
-                    for line in picoclaw_response.split("\n"):
+                    for line in response.split("\n"):
                         console.print(f"  {line}")
                     console.print()
                     s = Text()
-                    s.append(f"  ▸ agent", style="bold bright_cyan")
+                    s.append(f"  ▸ {tool_name}", style="bold bright_cyan")
                     s.append(f"  {elapsed:.1f}s", style="dim")
+                    if speed > 0:
+                        s.append(f"  ·  {speed:.1f} tok/s", style="bright_green")
                     console.print(s)
-                    session_tokens += len(picoclaw_response.split())
+                    session_tokens += len(response.split())
                     session_time += elapsed
                     session_turns += 1
+                    messages.append({"role": "user", "content": user_input})
+                    messages.append({"role": "assistant", "content": response})
                 else:
-                    console.print(f"  [bold red]agent failed[/]\n")
+                    console.print(f"  [bold red]tool failed[/]\n")
 
             elif use_tools:
                 # Web search → fast direct path (~3-5s)
