@@ -1,9 +1,13 @@
 """
-Fast expert reader for Nemotron — pread only active experts from binary files.
+MoE Expert Sniper — Read only active experts from SSD via F_NOCACHE + pread.
 
-6 active experts × 5.61 MB = 33.7 MB per layer (vs 718 MB for full layer).
-23 MoE layers × 33.7 MB = 775 MB per token.
-At 5 GB/s NVMe: 155ms → ~6 tok/s theoretical.
+For a 256-expert model with 8 active per token:
+  - Each expert: ~1.8 MB (4-bit quantized)
+  - Per layer: 8 × 1.8 MB = 14.4 MB
+  - Per token (40 layers): 576 MB
+  - At 5 GB/s NVMe: 115ms = 8.7 tok/s theoretical
+
+Uses multi-threaded pread (8 workers) to saturate NVMe queue depth.
 """
 
 import os
@@ -11,129 +15,196 @@ import json
 import fcntl
 import time
 import numpy as np
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
-
-import mlx.core as mx
 
 F_NOCACHE = 48
 PAGE_SIZE = 16384
 
-MLX_DTYPES = {
-    "uint32": mx.uint32,
-    "float16": mx.float16,
-    "bfloat16": mx.float16,  # We converted bf16→f16 in the bin files
-    "float32": mx.float32,
-}
+
+class LRUExpertCache:
+    """LRU cache for parsed expert data. Skips SSD reads on cache hits."""
+
+    def __init__(self, max_experts=100):
+        self.max_experts = max_experts
+        self.cache = OrderedDict()  # (layer_idx, expert_id) → parsed expert dict
+        self.hits = 0
+        self.misses = 0
+
+    def get(self, layer_idx, expert_id):
+        key = (layer_idx, expert_id)
+        if key in self.cache:
+            self.hits += 1
+            self.cache.move_to_end(key)
+            return self.cache[key]
+        self.misses += 1
+        return None
+
+    def put(self, layer_idx, expert_id, data):
+        key = (layer_idx, expert_id)
+        if key in self.cache:
+            self.cache.move_to_end(key)
+        else:
+            if len(self.cache) >= self.max_experts:
+                self.cache.popitem(last=False)
+            self.cache[key] = data
+
+    def hit_rate(self):
+        total = self.hits + self.misses
+        return self.hits / total if total > 0 else 0.0
+
+    def stats(self):
+        total = self.hits + self.misses
+        return (f"cache: {len(self.cache)}/{self.max_experts} entries, "
+                f"hit_rate={self.hit_rate():.1%} ({self.hits}/{total})")
 
 
-class NemotronExpertReader:
-    """Reads specific experts from binary layer files via pread."""
+class MoEExpertReader:
+    """
+    Reads specific experts from concatenated layer files via F_NOCACHE + pread.
+    Expert offset = data_start + expert_id × expert_block_size
+    """
 
-    def __init__(self, bin_dir, num_workers=4):
-        self.bin_dir = bin_dir
+    def __init__(self, expert_dir, num_layers, num_workers=8, cache_size=0):
+        self.expert_dir = expert_dir
+        self.num_layers = num_layers
         self.executor = ThreadPoolExecutor(max_workers=num_workers)
 
-        # Parse headers for all MoE layer files
+        # LRU cache (0 = disabled)
+        self.lru = LRUExpertCache(max_experts=cache_size) if cache_size > 0 else None
+
+        # Parse all layer headers
         self.headers = {}
         self.fds = {}
-        for f in os.listdir(bin_dir):
-            if f.startswith("moe_layer_") and f.endswith(".bin"):
-                layer_idx = int(f.split("_")[2].split(".")[0])
-                path = os.path.join(bin_dir, f)
-                with open(path, "rb") as fh:
-                    raw = fh.read(PAGE_SIZE)
-                self.headers[layer_idx] = json.loads(raw.rstrip(b"\x00"))
+        for i in range(num_layers):
+            path = f"{expert_dir}/layer_{i:02d}.bin"
+            with open(path, "rb") as f:
+                raw = f.read(PAGE_SIZE)
+            self.headers[i] = json.loads(raw.rstrip(b"\x00"))
 
-        if not self.headers:
-            raise FileNotFoundError(f"No bin files in {bin_dir}")
-
-        # Layout from first layer (all layers have same layout)
-        first = next(iter(self.headers.values()))["layout"]
-        self.expert_block_size = first["expert_block_size"]
-        self.data_start = first["data_start"]
-        self.tensor_layout = first["tensors"]
+        # Precompute layout info
+        h0 = self.headers[0]["layout"]
+        self.expert_block_size = h0["expert_block_size"]
+        self.data_start = h0["data_start"]
+        self.tensor_layout = h0["tensors"]
 
         # Stats
         self.read_time = 0.0
         self.reads = 0
         self.bytes_read = 0
+        self.cache_hits = 0
+
+        # Prefetch state
+        self.prefetch_futures = {}
 
     def _get_fd(self, layer_idx):
         if layer_idx not in self.fds:
-            path = os.path.join(self.bin_dir, f"moe_layer_{layer_idx:02d}.bin")
+            path = f"{self.expert_dir}/layer_{layer_idx:02d}.bin"
             fd = os.open(path, os.O_RDONLY)
             fcntl.fcntl(fd, F_NOCACHE, 1)
             self.fds[layer_idx] = fd
         return self.fds[layer_idx]
 
     def _read_expert(self, layer_idx, expert_id):
-        """Read one expert's raw bytes via pread."""
+        """Read one expert's data via pread. Thread-safe."""
         fd = self._get_fd(layer_idx)
         offset = self.data_start + expert_id * self.expert_block_size
-        return os.pread(fd, self.expert_block_size, offset)
 
-    def _parse_expert(self, raw_bytes):
-        """Parse raw bytes into dict of MLX arrays."""
+        # Read the full expert block
+        data = os.pread(fd, self.expert_block_size, offset)
+        return data
+
+    def _parse_expert_data(self, raw_data, expert_id):
+        """Parse raw bytes into MLX arrays for one expert."""
+        import mlx.core as mx
+
+        # Map dtype strings to MLX dtypes
+        MLX_DTYPES = {
+            "uint32": mx.uint32, "float16": mx.float16, "float32": mx.float32,
+            "bfloat16": mx.bfloat16,
+        }
+
         result = {}
         for name, info in self.tensor_layout.items():
-            off = info["inner_offset"]
+            inner_offset = info["inner_offset"]
             nbytes = info["nbytes"]
             shape = info["shape_per_expert"]
-            dtype = MLX_DTYPES.get(info["dtype"], mx.float16)
+            dtype_str = info["dtype"].replace("mlx.core.", "")
+            mlx_dtype = MLX_DTYPES.get(dtype_str, mx.float16)
 
-            arr_bytes = raw_bytes[off:off + nbytes]
-            if dtype == mx.uint32:
-                np_arr = np.frombuffer(arr_bytes, dtype=np.uint32).reshape(shape)
-            elif dtype == mx.float16:
-                np_arr = np.frombuffer(arr_bytes, dtype=np.float16).reshape(shape)
-            elif dtype == mx.float32:
-                np_arr = np.frombuffer(arr_bytes, dtype=np.float32).reshape(shape)
-            else:
-                np_arr = np.frombuffer(arr_bytes, dtype=np.float16).reshape(shape)
+            arr_bytes = raw_data[inner_offset:inner_offset + nbytes]
+            # Create MLX array directly from bytes (handles bfloat16 correctly)
+            flat = mx.array(np.frombuffer(arr_bytes, dtype=np.uint8))
+            arr = flat.view(mlx_dtype).reshape(shape)
+            result[name] = arr
 
-            result[name] = mx.array(np_arr)
         return result
 
+    def prefetch_experts(self, layer_idx, expert_ids):
+        """Launch parallel pread for experts not in cache. Non-blocking."""
+        futures = {}
+        for eid in expert_ids:
+            # Skip prefetch if already cached
+            if self.lru and (layer_idx, eid) in self.lru.cache:
+                continue
+            future = self.executor.submit(self._read_expert, layer_idx, eid)
+            futures[eid] = future
+        self.prefetch_futures[layer_idx] = futures
+
     def get_experts(self, layer_idx, expert_ids):
-        """Read and parse active experts for a layer.
+        """
+        Get parsed expert data for active experts.
+        Checks LRU cache first, then prefetched data, then reads from SSD.
 
-        Args:
-            layer_idx: MoE layer index
-            expert_ids: list of active expert IDs (e.g., [3, 17, 42, 88, 100, 120])
-
-        Returns:
-            dict[expert_id] -> dict[tensor_name -> mx.array]
+        Returns: dict[expert_id] → dict[tensor_name → mx.array]
         """
         t0 = time.time()
 
-        # Parallel pread for all active experts
-        futures = {
-            eid: self.executor.submit(self._read_expert, layer_idx, eid)
-            for eid in expert_ids
-        }
-
         experts = {}
-        for eid, future in futures.items():
-            raw = future.result()
-            experts[eid] = self._parse_expert(raw)
+        futures = self.prefetch_futures.pop(layer_idx, {})
+
+        for eid in expert_ids:
+            # 1. Check LRU cache
+            if self.lru:
+                cached = self.lru.get(layer_idx, eid)
+                if cached is not None:
+                    experts[eid] = cached
+                    self.cache_hits += 1
+                    continue
+
+            # 2. Check prefetched data
+            if eid in futures:
+                raw = futures[eid].result()
+            else:
+                # 3. Synchronous read
+                raw = self._read_expert(layer_idx, eid)
+
+            parsed = self._parse_expert_data(raw, eid)
+            experts[eid] = parsed
             self.bytes_read += len(raw)
+
+            # Store in cache
+            if self.lru:
+                self.lru.put(layer_idx, eid, parsed)
 
         self.read_time += time.time() - t0
         self.reads += len(expert_ids)
         return experts
 
-    def stack_experts(self, expert_data, expert_ids, tensor_name):
-        """Stack individual expert tensors into (K, ...) format for gather_qmm."""
-        return mx.stack([expert_data[eid][tensor_name] for eid in expert_ids])
-
     def stats(self):
         if self.reads == 0:
-            return "No reads"
+            return "No reads yet"
+        ssd_reads = self.reads - self.cache_hits
         avg_ms = self.read_time / self.reads * 1000
-        throughput = self.bytes_read / max(self.read_time, 0.001) / 1e9
-        return (f"reads={self.reads}, avg={avg_ms:.1f}ms/expert, "
-                f"throughput={throughput:.1f} GB/s, "
-                f"total={self.bytes_read/1e9:.2f} GB")
+        throughput = self.bytes_read / self.read_time / 1e9 if self.read_time > 0 else 0
+        s = (f"reads={self.reads}, ssd_reads={ssd_reads}, cache_hits={self.cache_hits}, "
+             f"avg={avg_ms:.1f}ms/expert, "
+             f"throughput={throughput:.1f} GB/s, "
+             f"total_bytes={self.bytes_read/1e9:.2f} GB, "
+             f"total_time={self.read_time:.1f}s")
+        if self.lru:
+            s += f"\n  {self.lru.stats()}"
+        return s
 
     def close(self):
         for fd in self.fds.values():
