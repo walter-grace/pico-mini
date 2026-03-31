@@ -1,6 +1,12 @@
 """
 MoE Expert Sniper — Read only active experts from SSD via F_NOCACHE + pread.
 
+NOTE: The LRU cache in this file is superseded by madvise-based prefetching
+in the llama.cpp eval callback. madvise achieves 2.4x higher throughput with
+5000x less memory overhead (0.57 vs 0.24 tok/s, 1 MB vs 5 GB on 8 GB MacBook).
+The LRU cache is retained for research reference and for the MLX path which
+uses direct I/O (F_NOCACHE + pread) instead of mmap.
+
 For a 256-expert model with 8 active per token:
   - Each expert: ~1.69 MB (4-bit quantized, moe_intermediate_size=512, hidden_size=2048)
   - Per layer: 8 × 1.69 MB = 13.5 MB

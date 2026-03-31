@@ -154,7 +154,31 @@ This means a single model handles **text + images + web search** on 8 GB hardwar
 
 All model files (GGUF weights, mmproj vision projector) can live on a **USB flash drive or external SSD**. The madvise prefetch hints help the OS prioritize the right expert pages under memory pressure. This enables fully portable AI — plug in a USB drive and run a 35B multimodal model on any Mac.
 
-## Measured Results
+## Honest Results: Three-Way A/B Test
+
+### llama.cpp Expert Memory Management (clean A/B on same hardware)
+
+**8 GB M2 MacBook Air, IQ2_M (10.6 GB), USB drive, ngl 0:**
+
+| Config | Generate | Memory Overhead | Status |
+|--------|----------|----------------|--------|
+| Stock llama.cpp | 0 tok/s | 0 | Thrashes, server fails to start |
+| LRU cache (5 GB) | 0.24 tok/s | 5,000 MB | Works but doubles memory reads |
+| **madvise prefetch** | **0.57 tok/s** | **1 MB** | 2.4x faster than cache |
+
+**A100 SXM4 80 GB, Qwen3-235B Q2_K (86 GB), 251 GB RAM, ngl 58:**
+
+| Config | Generate | vs Stock |
+|--------|----------|----------|
+| Stock llama.cpp | 1.32 tok/s | baseline |
+| LRU cache (5 GB) | 0.50 tok/s | -62% (overhead from mutex + memcpy) |
+| madvise prefetch | 0.81 tok/s | -38% (1,392 syscalls/token on resident pages) |
+
+**Conclusion:** On constrained RAM (8 GB), madvise enables inference that stock cannot do. On abundant RAM (251 GB), stock is optimal — any intervention adds overhead.
+
+**Note on prior GPU benchmarks:** GPU speed numbers (26-44.7 tok/s on RTX 3090, 66 tok/s on A6000, 1.4 tok/s on A100) were measured with stock llama.cpp, not our expert cache. A device pointer bug in the eval callback (dereferencing CUDA device pointers as host pointers) caused the cache to silently fail on all GPU tests. Fixed by adding `ggml_backend_buffer_is_host()` guard.
+
+## Measured Results (Individual Tests)
 
 ### Test: 8 GB M2 MacBook Air, model on USB flash drive
 

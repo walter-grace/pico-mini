@@ -102,15 +102,25 @@ Or from another machine:
 python3 sniper-router/router.py --server http://gpu-server:8201
 ```
 
-### llama.cpp Results
+### llama.cpp Results — Expert-Aware Prefetching (madvise)
+
+**Headline:** madvise prefetch enables 0.57 tok/s on 8 GB where stock produces zero output.
 
 | Hardware | Model | Speed | Notes |
 |----------|-------|-------|-------|
-| RTX 3090 (24 GB) | Q4_K_M (21 GB), ngl 35 | **44.7 tok/s** | Reproduced from scratch on RunPod |
-| RTX 3090 (cold) | Q4_K_M (21 GB), ngl 35 | **26.0 tok/s** | First request, cold OS page cache |
-| M2 MacBook Air (8 GB) | IQ2_M (10.6 GB), CPU + madvise | **0.57 tok/s** | Model on USB flash drive, 1 MB overhead |
-| M2 MacBook Air (8 GB) | IQ2_M (10.6 GB), CPU + LRU cache | 0.24 tok/s | 5 GB cache overhead (madvise is better) |
-| M2 MacBook Air (8 GB) | Q4_K_M (21 GB), CPU | Generates | Model is 2.6x larger than RAM |
+| **M2 MacBook Air (8 GB)** | IQ2_M (10.6 GB), madvise | **0.57 tok/s** | 1 MB overhead, stock thrashes |
+| M2 MacBook Air (8 GB) | IQ2_M (10.6 GB), LRU cache | 0.24 tok/s | 5 GB overhead (madvise is 2.4x better) |
+| M2 MacBook Air (8 GB) | Q4_K_M (21 GB), madvise | Generates | Model is 2.6x larger than RAM |
+
+**GPU baselines (stock llama.cpp, no expert cache):**
+
+| Hardware | Model | Speed | Notes |
+|----------|-------|-------|-------|
+| RTX 3090 (24 GB) | Q4_K_M (21 GB), ngl 35 | 44.7 tok/s | Stock llama.cpp, warm cache |
+| A6000 (48 GB) | 122B IQ2_M (39 GB), ngl 999 | 66.0 tok/s | Stock llama.cpp, full offload |
+| A100 (80 GB) | 235B Q2_K (86 GB), ngl 58 | 1.32 tok/s | Stock llama.cpp, model exceeds VRAM |
+
+Note: Prior GPU benchmarks had a device pointer bug where the eval callback dereferenced CUDA device pointers as host pointers, causing silent failures. All GPU speed numbers above are stock llama.cpp baselines. The expert cache was not contributing to these results.
 
 ## Docker (GPU — no build needed)
 
