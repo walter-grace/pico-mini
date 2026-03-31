@@ -1,182 +1,156 @@
-# MoE Sniper — 35B AI on 8 GB RAM
+# Expert Sniper — Run MoE Models Larger Than Your RAM
 
-Run a 35B multimodal AI model on an 8 GB MacBook. Text, vision, and web search — from a USB drive.
+Two approaches to running 30-35B MoE models on machines that can't hold them in memory.
+
+## Overview
+
+MoE (Mixture-of-Experts) models activate only 8 of 256 experts per token — 96.9% of weights are unused per computation. Expert Sniper exploits this sparsity: pin the small always-needed weights in RAM, stream only the active experts from SSD.
 
 ```
-  moe-sniper
-  35B multimodal AI on consumer hardware
-  ──────────────────────────────────────────────────
-  Model     Qwen3.5-35B-A3B (10.6 GB)
-  Hardware  Apple M2 (8 GB RAM)
-  Storage   USB flash drive
-  Tools     chat, search, shell, vision
-  ──────────────────────────────────────────────────
-  Model is 1.3x larger than RAM.
-  Expert cache makes this possible.
+Model: 17-21 GB
+RAM:   0.87-1.4 GB used
+The rest streams from disk on demand
 ```
 
-## How It Works
+## Two Paths
 
-Qwen3.5-35B-A3B is a Mixture-of-Experts model with 256 experts per layer, but only 8 activate per token — meaning 97% of the model is unused for any given computation.
+```
+expert-sniper/
+├── mlx-sniper/          ← Apple Silicon (MLX) — 4.33 tok/s on 16 GB Mac Mini
+│   ├── Install: pip install -e .
+│   ├── CLI: mlx-sniper chat ~/models/qwen3-30b
+│   └── Server: mlx-sniper server ~/models/qwen3-30b --port 8899
+│
+├── llama-cpp/           ← Cross-platform (CUDA/Metal/CPU) — 44.7 tok/s on RTX 3090
+│   ├── Agent: python3 sniper.py --model iq2
+│   └── Uses stock llama.cpp with partial GPU offload
+│
+├── sniper-router/       ← Remote client — run agent locally, inference remotely
+│   └── python3 router.py --server http://gpu-server:8201
+│
+├── docker/              ← Pre-built GPU server — no compilation needed
+│   └── docker build -f docker/Dockerfile -t moe-sniper .
+│
+├── scripts/             ← Reproducible benchmarks
+│   └── gpu_benchmark.sh
+│
+└── RESEARCH.md          ← Full technical writeup
+```
 
-We built an **expert-aware LRU cache** into llama.cpp that exploits this:
-- Hot experts stay pinned in RAM (~1.4 GB)
-- Cold experts live on disk (USB drive or SSD)
-- The OS can reclaim unused mmap pages without affecting performance
-- Result: a 10.6 GB model runs in 1.4 GB of RAM
+## MLX Sniper (Apple Silicon)
 
-Without our cache, llama.cpp mmap-thrashes for 15+ minutes with zero output. With it, the model generates coherent responses, describes images, and answers web search queries.
-
-## Quick Start
-
-### 1. Build llama.cpp with expert cache
+Best for: Mac Mini, MacBook Pro, Mac Studio with 16+ GB RAM.
 
 ```bash
-git clone https://github.com/ggml-org/llama.cpp.git
+# Install
+cd mlx-sniper && pip install -e .
+
+# Preprocess model (one-time, downloads ~17 GB)
+mlx-sniper preprocess mlx-community/Qwen3-30B-A3B-4bit -o ~/models/qwen3-30b
+
+# Or use the streaming preprocessor (lower peak memory):
+python3 stream_preprocess.py
+
+# Interactive chat
+mlx-sniper chat ~/models/qwen3-30b
+
+# OpenAI-compatible server (other machines can connect)
+mlx-sniper server ~/models/qwen3-30b --port 8899 --host 0.0.0.0
+```
+
+Full CLI and Python API: [huggingface.co/waltgrace/mlx-expert-sniper](https://huggingface.co/waltgrace/mlx-expert-sniper)
+
+### MLX Sniper Results (M4 Mac Mini, 16 GB)
+
+| Metric | Value |
+|--------|-------|
+| Model | Qwen3-30B-A3B (17.2 GB, 4-bit) |
+| Standard mlx_lm | OOM |
+| **Sniper speed** | **4.22–4.68 tok/s** |
+| Cache hit rate | 85–88.5% |
+| RAM used | 0.87 GB pinned |
+
+## llama.cpp Path (Cross-Platform GPU)
+
+Best for: NVIDIA GPUs, cloud servers (RunPod, Lambda, etc.), or any machine with llama.cpp.
+
+```bash
+# Build llama.cpp
+git clone --depth 1 https://github.com/ggml-org/llama.cpp.git
 cd llama.cpp
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc) --target llama-server
 
-# Copy our expert cache files into the source
-cp /path/to/sniper/llama-expert-cache*.h src/
-cp /path/to/sniper/llama-expert-cache*.cpp src/
-
-# Apply patches (add source files to CMakeLists, add --expert-cache-size flag)
-# See EXPERT_CACHE_PLAN.md for exact changes
-
-cmake -B build -DGGML_METAL=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j4 --target llama-server
-```
-
-### 2. Download model files
-
-You need three files (~12 GB total). Put them anywhere — USB drive, external SSD, or internal storage:
-
-```bash
-# Using huggingface-cli:
+# Download model
 pip install huggingface-hub
-
-# The model (pick one):
-huggingface-cli download unsloth/Qwen3.5-35B-A3B-GGUF \
-  Qwen3.5-35B-A3B-UD-IQ2_M.gguf --local-dir ./models
-# IQ2_M = 10.6 GB, fits on 16 GB machines via mmap, works on 8 GB with cache
-
-# Or for higher quality (needs more cache):
 huggingface-cli download unsloth/Qwen3.5-35B-A3B-GGUF \
   Qwen3.5-35B-A3B-Q4_K_M.gguf --local-dir ./models
-# Q4_K_M = 21 GB, needs expert cache on any machine under 24 GB
 
-# Vision projector (required for /image command):
-huggingface-cli download unsloth/Qwen3.5-35B-A3B-GGUF \
-  mmproj-F16.gguf --local-dir ./models
+# Start server
+./build/bin/llama-server -m ./models/Qwen3.5-35B-A3B-Q4_K_M.gguf \
+  -ngl 35 -c 2048 --port 8201 --host 0.0.0.0
+```
 
-# Web search (required for /search command):
+Then connect the interactive agent:
+```bash
 pip install ddgs
+python3 sniper-router/router.py --server http://localhost:8201
 ```
 
-### 3. Run the agent
+Or from another machine:
+```bash
+python3 sniper-router/router.py --server http://gpu-server:8201
+```
+
+### llama.cpp Results
+
+| Hardware | Model | Speed | Notes |
+|----------|-------|-------|-------|
+| RTX 3090 (24 GB) | Q4_K_M (21 GB), ngl 35 | **44.7 tok/s** | Reproduced from scratch on RunPod |
+| RTX 3090 (cold) | Q4_K_M (21 GB), ngl 35 | **26.0 tok/s** | First request, cold OS page cache |
+| M2 MacBook Air (8 GB) | IQ2_M (10.6 GB), CPU | **0.24 tok/s** | Model on USB flash drive |
+| M2 MacBook Air (8 GB) | Q4_K_M (21 GB), CPU | Generates | Model is 2.6x larger than RAM |
+
+## Docker (GPU — no build needed)
 
 ```bash
-cd sniper
+# Build from repo root
+docker build -f research/expert-sniper/docker/Dockerfile -t moe-sniper .
 
-# Point to your model directory:
-python3 sniper.py --model-dir /Volumes/USB\ DISK/gguf --model iq2 --cache 100
-
-# Or if models are in ~/models:
-python3 sniper.py --model-dir ~/models --model iq2 --cache 3000
+# Run (auto-downloads 21 GB model)
+docker run --gpus all -p 8201:8201 moe-sniper
 ```
 
-### USB Drive Setup
+## Remote Agent (router)
 
-Any USB drive works. Format as APFS (Mac) or exFAT (cross-platform). Just copy the GGUF files onto it:
-
-```
-USB Drive/
-  Qwen3.5-35B-A3B-UD-IQ2_M.gguf   (10.6 GB)
-  mmproj-F16.gguf                   (858 MB)
-```
-
-Plug it in, run:
-```bash
-python3 sniper.py --model-dir "/Volumes/YOUR_DRIVE" --model iq2 --cache 100
-```
-
-The expert cache compensates for USB read speeds by keeping hot experts in RAM.
-
-## Commands
-
-| Command | What it does |
-|---------|-------------|
-| (just type) | Chat with the 35B model |
-| `/search <query>` | Web search via DuckDuckGo + AI synthesis |
-| `/image <path>` | Describe an image (vision) |
-| `/shell <task>` | AI generates + executes a shell command |
-| `/stats` | Show token speed and counts |
-| `/clear` | Clear conversation history |
-| `/quit` | Exit |
-
-## GPU Offloading (`--ngl`)
-
-The `--ngl` flag controls how many model layers run on GPU vs CPU.
-
-**Tested on M2 MacBook Air (8 GB):** GPU offload OOMs even at `ngl 2`. The 10.6 GB model + GPU buffers exceed the 5.7 GB available VRAM. Use `--ngl 0` (CPU-only) on 8 GB machines.
+Run the agent UI on your laptop, inference on a remote GPU:
 
 ```bash
-# 8 GB machine — CPU only (tested, works)
-python3 sniper.py --model iq2 --cache 100 --ngl 0
-
-# 16+ GB machine — try GPU offload (untested, should help)
-python3 sniper.py --model iq2 --cache 3000 --ngl 20
+# On GPU server: start llama-server or mlx-sniper server
+# On your laptop:
+python3 sniper-router/router.py --server http://gpu-server:8201
 ```
 
-Machines with more RAM can try `--ngl 10`, `--ngl 20`, etc. Start low and increase until you see GPU memory errors, then back off.
+Supports: chat, `/search` (web search), `/image` (vision), `/screenshot`, `/shell`
 
-## Tested Results
+## Model
 
-All measured on an **8 GB M2 MacBook Air** with model on **USB flash drive**:
+**Qwen3.5-35B-A3B** (llama.cpp path) / **Qwen3-30B-A3B** (MLX path)
 
-| Capability | Result |
-|-----------|--------|
-| **Text** | "2+2 equals 4" — correct, 0.24 tok/s |
-| **Text (Q4_K_M, 21 GB)** | "2+2 equals 4" — model is 2.6x larger than RAM |
-| **Vision** | Correctly read IP address from screenshot, 0.7 tok/s |
-| **Web search** | Found live SpaceX Transporter-16 launch info, 0.24 tok/s |
-| **RAM usage** | 1,389 MB RSS for a 10,600 MB model |
-| **llama.cpp baseline** | OOMs on 9B GPU, thrashes on 35B — our cache fixes both |
+Both are Mixture-of-Experts with 256 experts per layer, 8 active per token. The key property: only ~3% of FFN weights are needed per computation, making expert streaming viable.
 
-Settings used: `--model iq2 --cache 100 --ngl 0 --ctx 2048`
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────┐
-│              sniper.py (agent)              │
-│  chat • search • shell • vision             │
-└──────────────┬──────────────────────────────┘
-               │ HTTP (localhost:8199)
-┌──────────────▼──────────────────────────────┐
-│     llama-server + expert-aware cache       │
-│  ┌─────────────┐  ┌──────────────────────┐  │
-│  │ LRU Cache   │  │ ggml_mul_mat_id      │  │
-│  │ hot experts │◄─│ eval callback        │  │
-│  │ in RAM      │  │ intercepts expert ops│  │
-│  └──────┬──────┘  └──────────────────────┘  │
-│         │ cache miss                         │
-│  ┌──────▼──────┐                             │
-│  │ mmap/pread  │                             │
-│  │ from disk   │                             │
-│  └──────┬──────┘                             │
-└─────────┼───────────────────────────────────┘
-          │
-┌─────────▼───────────────────────────────────┐
-│  USB Drive / SSD / NVMe                     │
-│  Qwen3.5-35B-A3B-UD-IQ2_M.gguf (10.6 GB)  │
-│  mmproj-F16.gguf (858 MB vision)            │
-└─────────────────────────────────────────────┘
-```
+| Quantization | Size | Source |
+|-------------|------|--------|
+| Q4_K_M (GGUF) | 21 GB | [unsloth/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
+| IQ2_M (GGUF) | 10.6 GB | [unsloth/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
+| 4-bit (MLX) | 17.2 GB | [mlx-community/Qwen3-30B-A3B-4bit](https://huggingface.co/mlx-community/Qwen3-30B-A3B-4bit) |
+| mmproj (vision) | 858 MB | [unsloth/Qwen3.5-35B-A3B-GGUF](https://huggingface.co/unsloth/Qwen3.5-35B-A3B-GGUF) |
 
 ## Research
 
-See [RESEARCH.md](RESEARCH.md) for full technical details on the MoE expert streaming architecture, implementation, and measured results.
-
-## License
-
-MIT — [github.com/walter-grace/mac-code](https://github.com/walter-grace/mac-code)
+See [RESEARCH.md](RESEARCH.md) for:
+- Expert streaming architecture details
+- Measured results with verified claims
+- GPU offload analysis
+- Multi-machine clustering design
+- Apple Silicon scaling projections

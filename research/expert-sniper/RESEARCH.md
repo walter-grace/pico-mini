@@ -2,7 +2,7 @@
 
 ## Problem
 
-Qwen3.5-35B-A3B is 22 GB at Q4_K_M (4-bit quantization, group_size=64). It will not fit in 8 GB RAM. llama.cpp and standard inference frameworks require the full model in memory and OOM on machines with less than 24 GB. The only workaround in llama.cpp is aggressive quantization to IQ2_M (2-bit, 10.6 GB), which degrades output quality and still requires 16 GB.
+Qwen3.5-35B-A3B is 21 GB at Q4_K_M (4-bit quantization, group_size=64). It will not fit in 8 GB RAM. llama.cpp and standard inference frameworks require the full model in memory and OOM on machines with less than 24 GB. The only workaround in llama.cpp is aggressive quantization to IQ2_M (2-bit, 10.6 GB), which degrades output quality and still requires 16 GB.
 
 ## Key Insight
 
@@ -52,7 +52,7 @@ Peak memory during splitting: ~2 GB (1.5 GB pinned + 0.5 GB per expert layer bei
 
 `MoEExpertReader` provides low-level SSD access to individual experts:
 
-- Opens layer files with `os.O_RDONLY` and sets `F_NOCACHE = 48` via `fcntl` to bypass the OS page cache (direct I/O). This prevents 22 GB of expert data from evicting useful pages from the 8 GB unified memory.
+- Opens layer files with `os.O_RDONLY` and sets `F_NOCACHE = 48` via `fcntl` to bypass the OS page cache (direct I/O). This prevents 21 GB of expert data from evicting useful pages from the 8 GB unified memory.
 - Reads expert blocks via `os.pread(fd, expert_block_size, offset)` where `offset = data_start + expert_id * expert_block_size`. Random access, no seeking.
 - Multi-threaded parallel reads via `ThreadPoolExecutor` (4 workers on 8 GB MacBook, 8 workers on 16 GB machines) to saturate NVMe/USB queue depth.
 - Asynchronous prefetch: `prefetch_experts(layer_idx+1, active_ids)` launches reads for the next layer while the current layer computes, overlapping I/O with compute.
@@ -180,7 +180,7 @@ Cache:   100 MB expert LRU cache
 Image:   macOS network settings screenshot
 Answer:  "This image shows a network configuration interface, likely from a
           macOS system preferences or network utility screen. It displays IPv4
-          settings configured manually: IP address: 192.168.100.2"
+          settings configured manually with a local IP address"
 
 Prompt:  559 tokens at 2.3 tok/s (vision encoder)
 Gen:     50 tokens at 0.7 tok/s
@@ -207,7 +207,7 @@ With cache: generates within minutes
 | **Qwen3.5-9B** | llama.cpp | Q4_K_M | 5.3 GB | Partial (ngl 20) | **OOM** |
 | **Qwen3.5-9B** | llama.cpp | Q4_K_M | 5.3 GB | CPU-only (ngl 0) | Works, ~0.1 tok/s |
 | **Qwen3.5-35B-A3B** | llama.cpp | IQ2_M | 10.6 GB | Any | **OOM** |
-| **Qwen3.5-35B-A3B** | Expert streaming | Q4_K_M | 22 GB | Full | **Works, 0.03 tok/s** |
+| **Qwen3.5-35B-A3B** | Expert streaming | Q4_K_M | 21 GB | Full | **Works, 0.03 tok/s** |
 
 On 8 GB hardware, llama.cpp cannot GPU-accelerate even a 9B model. Expert streaming runs a 35B model (4x larger) with full GPU acceleration and only 1.9 GB peak memory.
 
@@ -216,11 +216,11 @@ On 8 GB hardware, llama.cpp cannot GPU-accelerate even a 9B model. Expert stream
 | Method | Quant | Size | Min RAM | Speed | Quality |
 |--------|-------|------|---------|-------|---------|
 | llama.cpp (9B, CPU-only) | Q4_K_M | 5.3 GB | 8 GB | ~0.1 tok/s | Full (9B) |
-| Expert streaming (USB) | Q4_K_M | 22 GB | 8 GB | 0.03 tok/s | Full (35B) |
-| Expert streaming (NVMe) | Q4_K_M | 22 GB | 8 GB | 1-2 tok/s* | Full (35B) |
-| Expert streaming (NVMe + LRU cache) | Q4_K_M | 22 GB | 8 GB | 5-9 tok/s* | Full (35B) |
+| Expert streaming (USB) | Q4_K_M | 21 GB | 8 GB | 0.03 tok/s | Full (35B) |
+| Expert streaming (NVMe) | Q4_K_M | 21 GB | 8 GB | 1-2 tok/s* | Full (35B) |
+| Expert streaming (NVMe + LRU cache) | Q4_K_M | 21 GB | 8 GB | 5-9 tok/s* | Full (35B) |
 | llama.cpp (35B) | IQ2_M | 10.6 GB | 16 GB | ~30 tok/s | Degraded |
-| llama.cpp (35B) | Q4_K_M | 22 GB | 24+ GB | ~30 tok/s | Full (35B) |
+| llama.cpp (35B) | Q4_K_M | 21 GB | 24+ GB | ~30 tok/s | Full (35B) |
 
 *Projected, not yet measured on internal NVMe.
 
@@ -246,7 +246,7 @@ The bottleneck for expert streaming is SSD read throughput, not memory bandwidth
 | **M4 Ultra** | 819 GB/s | ~7.4 GB/s | 128-512 GB | Ultra doesn't double SSD BW |
 | **M5 (est.)** | ~600+ GB/s | ~8-10 GB/s? | TBD | PCIe 5.0 NVMe could unlock this |
 
-### Projected Performance: Qwen3.5-35B-A3B (22 GB, Q4_K_M)
+### Projected Performance: Qwen3.5-35B-A3B (21 GB, Q4_K_M)
 
 Per-token SSD read: **540 MB** (no cache) or **108 MB** (80% LRU cache hit rate)
 
@@ -313,7 +313,7 @@ The same technique applies to any MoE model. Here's the landscape:
 
 | Model | Total Size (4-bit) | Experts | Active/Token | Pinned | Per-token Read | Min RAM |
 |-------|-------------------|---------|--------------|--------|----------------|---------|
-| Qwen3.5-35B-A3B | 22 GB | 256 × 40 | 8 | 1.4 GB | 540 MB | **8 GB** |
+| Qwen3.5-35B-A3B | 21 GB | 256 × 40 | 8 | 1.4 GB | 540 MB | **8 GB** |
 | Qwen3.5-122B-A10B | 70 GB | 256 × 48 | 10 | 2.9 GB | 1.2 GB | **8 GB** |
 | Mixtral-8x22B | 80 GB | 8 × 32 | 2 | 12 GB | 2.5 GB | **16 GB** |
 | DeepSeek-V3 (671B) | ~350 GB | 256 × 61 | 8 | ~15 GB | 3.8 GB | **24 GB** |
@@ -331,6 +331,66 @@ Three hardware trends make this technique more viable over time:
 3. **MoE is becoming the default architecture.** Qwen3.5, DeepSeek-V3, Mixtral, and most frontier models are MoE. The sparsity that makes expert streaming possible is a permanent feature of the model landscape, not a niche.
 
 The crossover point — where expert streaming with caching matches full in-memory inference speed — occurs when `cache_hit_rate > 1 - (SSD_BW / mem_BW)`. On an M4 Pro (273 GB/s memory, 5.2 GB/s SSD), that's a 98% hit rate, achievable with ~4 GB of cache on 24 GB machines.
+
+## GPU Offloading and the Expert Tensor Problem
+
+### The Problem
+
+When `ngl > 0`, llama.cpp offloads entire layers to GPU — including expert tensors (`ffn_up_exps`, `ffn_gate_exps`, `ffn_down_exps`). The Metal `mul_mat_id` kernel expects the full stacked `[n_embd, n_ff, n_expert]` tensor in GPU memory. For 256 experts per layer, that's the bulk of the model trying to fit in VRAM.
+
+On Apple Silicon, `recommendedMaxWorkingSetSize` is ~75% of total RAM (e.g., ~6 GB on 8 GB, ~12 GB on 16 GB). With `ngl 5+`, expert tensors + attention + compute buffers exceed this limit and the GPU OOMs.
+
+### Tested on 8 GB M2 MacBook Air (IQ2_M, 10.6 GB)
+
+| Config | Prefill | Generate | Status |
+|--------|---------|----------|--------|
+| `ngl 0` (CPU only) | 0.26 tok/s | 0.24 tok/s | Works, fastest on 8 GB |
+| `ngl 2` | 0.2 tok/s | ~0 tok/s | Barely works |
+| `ngl 5+` | — | — | GPU OOM |
+| `ngl 20` + `--override-tensor "ffn_.*_exps=CPU"` | 0.08 tok/s | 0.02 tok/s | Works but slow |
+
+### Tested on RunPod RTX 3090 (24 GB VRAM, Q4_K_M 21 GB)
+
+| Config | Prefill | Generate | Status |
+|--------|---------|----------|--------|
+| `ngl 999` (full offload) | — | — | OOM — 21 GB model + compute > 24 GB |
+| `ngl 35` (35/41 layers on GPU) | **122.3 tok/s** | **26.0 tok/s** | 17.5 GB on GPU, 3.5 GB on CPU |
+
+26 tok/s generation on a 35B MoE model — conversational speed. The model does NOT fit entirely on a 24 GB GPU, but partial offload (ngl 35) is highly effective. This is where expert-aware GPU offloading would help further: keep expert tensors on CPU, maximize attention layers on GPU.
+
+### The `--override-tensor` Solution
+
+llama.cpp has a per-tensor backend override mechanism (`src/llama-model-loader.cpp:1153-1172`). By forcing expert tensors to CPU while offloading attention layers to GPU:
+
+```bash
+llama-server -m model.gguf -ngl 20 \
+  --override-tensor "ffn_gate_exps=CPU" \
+  --override-tensor "ffn_up_exps=CPU" \
+  --override-tensor "ffn_down_exps=CPU"
+```
+
+This prevents the GPU OOM because expert tensors (~90% of model weight) stay on CPU. Attention, router, and shared expert layers run on GPU.
+
+**On 8 GB:** This is slower than pure CPU (0.02 vs 0.24 tok/s) because the cross-device data transfer overhead for every expert operation exceeds the GPU compute benefit. The scheduler must shuttle activations between GPU (attention) and CPU (experts) 40 times per token.
+
+**On 16+ GB:** This split should perform better because:
+- More GPU working set for attention/compute buffers
+- Less memory pressure means fewer mmap page faults
+- The cross-device overhead is fixed (~0.1ms per transfer) while GPU attention compute scales with model size
+
+### Root Cause (from llama.cpp source analysis)
+
+1. **Expert offloading follows layer assignment** (`llama-model.cpp:2646-2671`): `ffn_up_exps` gets the same backend as the layer's attention tensors. No per-op-type control.
+2. **Metal `mul_mat_id` expects GPU buffers** (`ggml-metal-ops.cpp:2282`): The kernel binds `op->src[0]` as a Metal buffer. No CPU fallback.
+3. **mmap page faults compete with GPU** on unified memory: macOS pages in expert data from the mmap'd file, competing with GPU buffer allocations for the same physical memory.
+
+### Future Fix: Expert-Aware GPU Offloading
+
+The proper solution is teaching llama.cpp to offload attention/router to GPU while keeping expert tensors on CPU with our LRU cache. This requires:
+
+1. Automatic `--override-tensor` for expert tensors when `--expert-cache-size > 0`
+2. Optimized CPU `mul_mat_id` path that reads from the LRU cache instead of mmap
+3. Prefetching: while GPU computes attention for layer N, CPU pre-loads experts for layer N from cache
 
 ## Multi-Machine Expert Streaming
 
@@ -431,20 +491,18 @@ This means the interconnect latency for passing activations between machines is 
 
 A Lean proof could establish: "Given N machines with measured SSD bandwidth S and measured interconnect latency L, the system achieves target_tok_s if and only if `N * S * cache_hit_rate > bytes_per_token * target_tok_s`." This gives a concrete engineering target: how many machines do you need for a given speed target?
 
-## Files
+## Files (this repo)
 
 | File | Purpose |
 |------|---------|
-| `split_mlx_model_macbook.py` | Convert MLX model → flash stream format (pinned + expert bins) |
-| `expert_io.py` | F_NOCACHE + pread expert reader with prefetch |
-| `moe_agent_macbook.py` | 35B agent on 8 GB MacBook (full engine + chat/search/shell) |
-| `flash_moe.py` | MoE engine with gather_qmm fusion |
-| `batched_moe.py` | Union-of-experts batched verification + LRU cache |
-| `sniper_122b.py` | 122B MoE on NVIDIA 24 GB GPU (PyTorch/CUDA) |
-| `interactive_demo.py` | Interactive demo with streaming + llama.cpp backends |
-| `direct_io.py` | F_NOCACHE direct I/O infrastructure |
-| `flash_agent.py` | 32B dense model agent (FFN streaming) |
+| `sniper.py` | Interactive agent (chat, search, vision, shell) |
+| `sniper-router/router.py` | Remote inference client |
+| `expert_io.py` | F_NOCACHE + pread expert reader with LRU cache |
+| `docker/` | Pre-built GPU inference server |
+| `scripts/gpu_benchmark.sh` | Reproducible GPU benchmark |
 | `RESEARCH.md` | This document |
+
+Note: The MLX research files referenced in the Implementation section above (`split_mlx_model_macbook.py`, `moe_agent_macbook.py`, `flash_moe.py`, `batched_moe.py`, etc.) describe the Apple Silicon MLX path. They are archived separately and available in the [MLX expert sniper](https://huggingface.co/waltgrace/mlx-expert-sniper) project.
 
 ## Citation
 

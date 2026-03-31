@@ -2,10 +2,10 @@
 MoE Expert Sniper — Read only active experts from SSD via F_NOCACHE + pread.
 
 For a 256-expert model with 8 active per token:
-  - Each expert: ~1.8 MB (4-bit quantized)
-  - Per layer: 8 × 1.8 MB = 14.4 MB
-  - Per token (40 layers): 576 MB
-  - At 5 GB/s NVMe: 115ms = 8.7 tok/s theoretical
+  - Each expert: ~1.69 MB (4-bit quantized, moe_intermediate_size=512, hidden_size=2048)
+  - Per layer: 8 × 1.69 MB = 13.5 MB
+  - Per token (40 layers): ~540 MB
+  - At 3-5 GB/s NVMe: ~108-180ms = 5.6-9.3 tok/s theoretical
 
 Uses multi-threaded pread (8 workers) to saturate NVMe queue depth.
 """
