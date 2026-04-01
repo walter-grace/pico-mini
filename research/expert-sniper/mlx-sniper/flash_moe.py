@@ -219,7 +219,7 @@ def main():
 
     fallback_path = os.environ.get(
         "MOE_FALLBACK_PATH",
-        "/Volumes/USB DISK/expert_fallback_down_1bit.bin"
+        "/Volumes/USB DISK/expert_fallback_down_ternary.bin"
     )
     print("\nInitializing MoE expert reader (8 threads, F_NOCACHE)...")
     reader = MoEExpertReader(

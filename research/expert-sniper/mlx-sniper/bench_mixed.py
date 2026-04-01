@@ -15,7 +15,7 @@ import mlx.nn as nn
 from expert_io import MoEExpertReader
 
 EXPERT_DIR = os.path.expanduser("~/models/qwen35-35b-moe-stream/experts")
-FALLBACK_PATH = "/Volumes/USB DISK/expert_fallback_down_1bit.bin"
+FALLBACK_PATH = "/Volumes/USB DISK/expert_fallback_down_ternary.bin"
 NUM_LAYERS = 10
 TOP_K = 8
 NUM_EXPERTS = 256

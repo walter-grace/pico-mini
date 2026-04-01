@@ -27,19 +27,19 @@ PAGE_SIZE = 16384
 
 class DownProjFallback:
     """
-    1-bit fallback buffer for down_proj only (mixed-precision strategy).
+    Ternary fallback buffer for down_proj only (mixed-precision strategy).
 
     On cache miss:
       gate_proj → pread from SSD (4-bit, full quality)
       up_proj   → pread from SSD (4-bit, full quality)
-      down_proj → instant dequant from mmap'd 1-bit buffer (0.81 cosine)
+      down_proj → instant dequant from mmap'd ternary buffer (0.89 cosine)
 
-    Saves 33% of SSD I/O per cache miss. Buffer is ~792 MB (down_proj only)
-    vs 2.38 GB for all projections.
+    Ternary: {-scale, 0, +scale} per group. Captures sparsity.
+    Packing: 2 bits per value (00=zero, 01=+scale, 10=-scale), 4 per byte.
 
-    File format: 16KB JSON header + [layer][expert] down_proj data
-    Per expert: fp16 scales + packed sign bits for down_proj
-    Reconstruction: weight = scale * (2*bit - 1)
+    Supports both formats:
+      - expert_fallback_down_ternary_v1 (ternary, 1.5 GB)
+      - expert_fallback_down_1bit_v1 (1-bit, 792 MB, legacy)
     """
 
     DOWN_SHAPE = (2048, 512)
@@ -67,56 +67,81 @@ class DownProjFallback:
                     self.header = json.loads(raw[: i + 1])
                     break
 
+        self.fmt = self.header["format"]
+        self.is_ternary = "ternary" in self.fmt
         self.num_layers = self.header["num_layers"]
         self.num_experts = self.header["num_experts"]
-        self.expert_1bit_size = self.header["expert_1bit_size"]
         self.data_start = self.header["data_start"]
 
         padded = self.VALUES + (-self.VALUES % group_size)
         n_groups = padded // group_size
         self.n_groups = n_groups
-        self.scales_bytes = n_groups * 2
-        self.packed_bytes = n_groups * (group_size // 8)
+        self.scales_bytes = n_groups * 2  # fp16
+
+        if self.is_ternary:
+            # 2 bits per value, 4 per byte
+            total_codes = n_groups * group_size
+            self.packed_bytes = (total_codes + 3) // 4
+            self.expert_size = self.header["expert_ternary_size"]
+        else:
+            # 1 bit per value, 8 per byte
+            self.packed_bytes = n_groups * (group_size // 8)
+            self.expert_size = self.header["expert_1bit_size"]
 
         self._fd = os.open(path, os.O_RDONLY)
         self._mm = mmap.mmap(self._fd, 0, access=mmap.ACCESS_READ)
         self.enabled = True
 
-        # Precompute bit masks for GPU unpack (128, 64, 32, 16, 8, 4, 2, 1)
         import mlx.core as mx
-        self._bit_masks = mx.array([128, 64, 32, 16, 8, 4, 2, 1], dtype=mx.uint8)
+        if self.is_ternary:
+            # Masks for unpacking 2-bit codes: 4 values per byte
+            self._shift_vals = mx.array([0, 2, 4, 6], dtype=mx.uint32)
+        else:
+            # Masks for unpacking 1-bit signs: 8 values per byte
+            self._bit_masks = mx.array([128, 64, 32, 16, 8, 4, 2, 1], dtype=mx.uint8)
 
         file_mb = os.path.getsize(path) / 1024 / 1024
-        print(f"  [fallback] mmap'd {file_mb:.0f} MB down_proj 1-bit buffer "
+        mode = "ternary" if self.is_ternary else "1-bit"
+        print(f"  [fallback] mmap'd {file_mb:.0f} MB down_proj {mode} buffer "
               f"({self.num_layers} layers × {self.num_experts} experts)")
 
     def get_down_proj_f16(self, layer_idx, expert_id):
         """
-        Dequantize down_proj from 1-bit buffer to float16 mx.array [2048, 512].
-        Uses MLX GPU ops for bit unpacking — no numpy unpackbits.
+        Dequantize down_proj to float16 mx.array [2048, 512].
+        MLX GPU ops — no numpy loops.
         """
         import mlx.core as mx
 
         t0 = time.time()
-        offset = self.data_start + (layer_idx * self.num_experts + expert_id) * self.expert_1bit_size
+        offset = self.data_start + (layer_idx * self.num_experts + expert_id) * self.expert_size
 
         s_end = offset + self.scales_bytes
         p_end = s_end + self.packed_bytes
 
-        # Read raw bytes from mmap into numpy (small copy)
         scales_np = np.frombuffer(self._mm[offset:s_end], dtype=np.float16).copy()
         packed_np = np.frombuffer(self._mm[s_end:p_end], dtype=np.uint8).copy()
 
-        # Move to MLX — GPU does the rest
         scales = mx.array(scales_np).reshape(self.n_groups, 1)
-        packed = mx.array(packed_np).reshape(self.n_groups, self.group_size // 8)
+        packed = mx.array(packed_np)
 
-        # Unpack sign bits on GPU: each uint8 → 8 bits via bitwise AND
-        bits = (mx.expand_dims(packed, -1) & self._bit_masks) > 0
-        bits = bits.reshape(self.n_groups, self.group_size).astype(mx.float16)
+        if self.is_ternary:
+            # Unpack 2-bit codes on GPU: each byte → 4 values
+            # packed shape: (total_bytes,)
+            # Expand: (total_bytes, 1) >> [0,2,4,6] & 0x3 → (total_bytes, 4)
+            codes = (mx.expand_dims(packed.astype(mx.uint32), -1) >> self._shift_vals) & 0x3
+            codes = codes.reshape(-1)[:self.n_groups * self.group_size]
+            codes = codes.reshape(self.n_groups, self.group_size).astype(mx.float16)
 
-        # Dequant: weight = scale * (2*bit - 1)
-        weights = (2.0 * bits - 1.0) * scales.astype(mx.float16)
+            # Map: 0→0.0, 1→+1.0, 2→-1.0
+            signs = mx.where(codes == 1, 1.0, mx.where(codes == 2, -1.0, 0.0))
+            weights = signs * scales.astype(mx.float16)
+        else:
+            # 1-bit: unpack sign bits
+            packed = packed.reshape(self.n_groups, self.group_size // 8)
+            bits = (mx.expand_dims(packed, -1) & self._bit_masks) > 0
+            bits = bits.reshape(self.n_groups, self.group_size).astype(mx.float16)
+            weights = (2.0 * bits - 1.0) * scales.astype(mx.float16)
+
         weights = weights.reshape(-1)[:self.VALUES].reshape(self.DOWN_SHAPE)
         mx.eval(weights)
 
@@ -132,7 +157,8 @@ class DownProjFallback:
 
     def stats(self):
         avg_ms = (self.dequant_time / self.fallback_hits * 1000) if self.fallback_hits > 0 else 0
-        return (f"fallback_hits={self.fallback_hits}, "
+        mode = "ternary" if self.is_ternary else "1-bit"
+        return (f"fallback_hits={self.fallback_hits}, mode={mode}, "
                 f"avg_dequant={avg_ms:.1f}ms, "
                 f"total_dequant={self.dequant_time:.2f}s")
 
