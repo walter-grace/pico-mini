@@ -343,17 +343,26 @@ Rules:
 
             const promises = servers.map(async (server) => {
               try {
+                // Pre-check: is server even reachable?
                 const cmpClient = new LlamaClient(server.url);
+                try {
+                  await cmpClient.health();
+                } catch {
+                  results[server.name] = `OFFLINE — server not running on ${server.url}`;
+                  updateStreamDisplay();
+                  return;
+                }
                 results[server.name] = "";
-                await new Promise<void>((resolve) => {
+                await new Promise<void>((resolve, reject) => {
                   cmpClient.streamChat(compareMessages, {
                     onToken: (token) => { results[server.name] += token; updateStreamDisplay(); },
                     onDone: (s) => { cmpStats[server.name] = { tokPerSec: s.tokPerSec, tokens: s.totalTokens }; updateStreamDisplay(); resolve(); },
                     onError: (err) => { results[server.name] = `ERROR: ${err}`; updateStreamDisplay(); resolve(); },
-                  });
+                  }).catch((e) => { results[server.name] = `ERROR: ${e.message?.split("\n")[0]}`; updateStreamDisplay(); resolve(); });
                 });
               } catch (e: any) {
-                results[server.name] = `ERROR: ${e.message?.split("\n")[0]}`;
+                results[server.name] = `ERROR: ${e.message?.split("\n")[0] || "Connection failed"}`;
+                updateStreamDisplay();
               }
             });
 
