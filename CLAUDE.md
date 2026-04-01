@@ -120,3 +120,73 @@ Both use text-based intent routing (not JSON tool calling). Switch with `/model 
 - PicoClaw config: `~/.picoclaw/config.json`
 - PicoClaw sessions: `~/.picoclaw/workspace/sessions/`
 - PicoClaw binary: `<repo>/picoclaw/build/picoclaw-darwin-arm64`
+
+---
+
+## Expert Sniper (MoE inference larger than RAM)
+
+### What it is
+MLX-based MoE inference engine for Apple Silicon. Runs models
+larger than RAM by only loading active experts from SSD.
+
+### Quick reference
+- CLI package: `research/expert-sniper/cli-agent/`
+- Main engine: `research/expert-sniper/mlx-sniper/`
+- llama.cpp patch: `research/expert-sniper/llama-cpp/`
+- Ternary fallback research: `research/1bit-fallback/`
+
+### Key files
+- `cli-agent/src/mlx_expert_sniper/cli.py` — CLI entry point
+- `cli-agent/src/mlx_expert_sniper/engine.py` — forward pass engine (35B)
+- `cli-agent/src/mlx_expert_sniper/expert_io.py` — SSD streaming + LRU cache
+- `cli-agent/src/mlx_expert_sniper/calibrate.py` — one-time calibration
+- `cli-agent/src/mlx_expert_sniper/coactivation.py` — cross-layer prediction
+- `cli-agent/src/mlx_expert_sniper/preprocess.py` — model split/preprocess
+
+### Working commands
+```
+mlx-sniper calibrate <model-dir> [--quick] [--force]
+mlx-sniper run <model-dir> -p "prompt" [-v]
+```
+
+### Not yet implemented
+```
+mlx-sniper download <model-name>  — needs preprocess integration
+mlx-sniper chat <model-dir>       — interactive mode
+mlx-sniper server <model-dir>     — OpenAI-compatible API
+```
+
+### Architecture
+The engine streams expert weights from SSD using pread + F_NOCACHE,
+bypassing the macOS page cache. A right-sized LRU cache keeps hot
+experts in Metal unified memory. Co-activation prediction prefetches
+likely experts. Cache-aware routing biases the router toward cached
+experts.
+
+Three optimizations give 6.9x speedup:
+1. Right-sized cache (don't overfill RAM)
+2. Co-activation prediction (70% cross-layer accuracy)
+3. Routing bias (nudge router toward cached experts)
+
+Calibrate runs once per model and saves the config.
+
+### Model format
+Models must be preprocessed into "sniper streaming format":
+- `pinned.safetensors` — attention + norms (stays in RAM)
+- `bin/layer_XX.bin` — expert weights per layer (streamed from SSD)
+- `config.json` — model config
+- `sniper_config.json` — calibration output
+- `sniper_calibration.npz` — co-activation matrix + REAP scores
+
+### How to add a new model
+1. Download the MLX 4-bit version from HuggingFace
+2. Write a split script (see `mlx-sniper/split_35b_v2.py` as template)
+3. Run `mlx-sniper calibrate` on the processed model
+4. Test with `mlx-sniper run`
+
+### Dependencies
+mlx, numpy, transformers, safetensors, huggingface_hub
+
+### Hardware
+Apple Silicon only (M1/M2/M3/M4). 16 GB RAM minimum for
+the MLX path. 8 GB works with llama.cpp madvise path only.

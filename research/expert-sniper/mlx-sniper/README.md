@@ -37,6 +37,29 @@ mlx-sniper profile ~/models/qwen3-30b --tokens 100
 | RAM | 8.7 GB (35B) / 9.1 GB (30B) |
 | Hardware | M4 Mac Mini 16 GB, 5 varied prompts, cold start |
 
+## Supported Models
+
+| Model | Size | Experts | tok/s (M4 16GB) | Status |
+|-------|------|---------|-----------------|--------|
+| Qwen3.5-35B-A3B | 19.5 GB | 256/layer | 5.4 tok/s | Verified |
+| Qwen3-30B-A3B | 17.2 GB | 128/layer | 3.3 tok/s | Verified |
+
+More models coming. To request a model, open an issue.
+
+### Hardware Requirements
+
+| Mac | RAM | What you can run |
+|-----|-----|-----------------|
+| Any Apple Silicon | 8 GB | llama.cpp path only (0.57 tok/s) |
+| M1/M2/M3/M4 | 16 GB | Qwen3.5-35B-A3B at 5.4 tok/s |
+| M1/M2/M3/M4 Pro/Max | 32 GB+ | Larger models, faster speeds |
+
+### What this does NOT support yet
+- Dense models (only MoE architectures)
+- Non-Qwen models (architecture-specific for now)
+- Windows/Linux (Apple Silicon only for MLX path)
+- llama.cpp path has no calibration (madvise only)
+
 ## Full Package
 
 The complete pip-installable package with CLI, server, and Python API is at:
