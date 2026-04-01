@@ -1,0 +1,5 @@
+node_modules/
+*.gguf
+models/
+.DS_Store
+dist/
