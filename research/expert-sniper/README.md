@@ -73,7 +73,16 @@ Full CLI and Python API: [huggingface.co/waltgrace/mlx-expert-sniper](https://hu
 | RAM | 8.7 GB (35B) / 9.1 GB (30B) |
 | Hardware | M4 Mac Mini 16 GB, 5 varied prompts, cold start |
 
-35B: routing bias=1.0 + co-activation prefetch + right-sized LRU. Quality verified from cold start. REAP dead-expert masking tested (45% dead) but NOT used in final numbers — static masking breaks factual knowledge on topics outside calibration set. 30B: right-sized LRU + co-activation (bias not yet applied).
+Both models: routing bias=1.0 + co-activation prefetch + right-sized LRU cache. Quality verified from cold start. `mlx-sniper calibrate` finds optimal parameters automatically.
+
+### Routing Bias: Universal Sweet Spot
+
+| Model | Experts | No bias | bias=1.0 | Speedup | bias=1.5 |
+|-------|---------|---------|----------|---------|----------|
+| Qwen3.5-35B-A3B | 256/layer | 2.42 tok/s | **5.37 tok/s** | 2.2x | Quality degrades |
+| Qwen3-30B-A3B | 128/layer | 3.34 tok/s | **4.29 tok/s** | 1.3x | Quality degrades |
+
+bias=1.0 is the safe maximum for both. At 1.5, both fail the same question (Australia capital). The threshold is a property of MoE routing, not expert count.
 
 ## llama.cpp Path (Cross-Platform GPU)
 

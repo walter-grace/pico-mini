@@ -9,7 +9,7 @@
 | Any Mac | 8 GB | Qwen3.5-9B (Q4_K_M, 5.3 GB), 4K context | 16-20 tok/s |
 | Any Mac | 16 GB | Qwen3.5-9B (Q4_K_M, 5.3 GB), 64K context | 16-20 tok/s |
 | **Mac mini M4** | **16 GB** | **Qwen3.5-35B-A3B (IQ2_M, 10.6 GB)** | **30 tok/s** |
-| **Mac mini M4** | **16 GB** | **Qwen3-30B-A3B Q4 (17.2 GB) via Expert Sniper** | **3.3 tok/s** |
+| **Mac mini M4** | **16 GB** | **Qwen3-30B-A3B Q4 (17.2 GB) via Expert Sniper** | **4.3 tok/s** |
 | **Mac mini M4** | **16 GB** | **Qwen3.5-35B-A3B Q4 (19.5 GB) via Expert Sniper** | **5.4 tok/s** |
 | Mac mini M4 | 16 GB | Qwen3.5-35B-A3B Q4_K_M (22 GB) via Flash Streaming | 1.54 tok/s |
 | Mac mini M4 | 16 GB | Qwen3.5-27B (16.1 GB) via Flash Streaming | 0.18 tok/s |
@@ -82,10 +82,10 @@ Every number below was measured on a 16 GB Mac mini M4. Nothing estimated.
 |-------|-----------|---------|-------|---------|
 | Qwen3-32B (dense) | 18.4 GB | 4.5 GB | 0.15 tok/s | Full 4-bit |
 | **Qwen3.5-27B (dense hybrid)** | **16.1 GB** | **5.5 GB** | **0.18 tok/s** | **Full 4-bit** |
-| Qwen3-30B-A3B (MoE) | 17.2 GB | 9.1 GB | 3.3 tok/s | Full 4-bit |
+| Qwen3-30B-A3B (MoE) | 17.2 GB | 8.7 GB | 4.3 tok/s | Full 4-bit |
 | Qwen3.5-35B-A3B (MoE) | 19.5 GB | 8.7 GB | 5.4 tok/s | Full 4-bit |
 
-All numbers measured on M4 Mac Mini 16 GB across 5 varied prompts from cold start. Quality verified (Canberra, 8.3066, correct Python, etc). 35B: cache-aware routing bias (1.0) + co-activation prefetch + right-sized LRU (4000 experts). 6.9x speedup from software alone. 30B: right-sized LRU + co-activation prefetch (bias not yet applied).
+All numbers measured on M4 Mac Mini 16 GB across 5 varied prompts from cold start. Quality verified (Canberra, 8.3066, correct Python, etc). Both models: cache-aware routing bias (1.0) + co-activation prefetch + right-sized LRU cache. bias=1.0 is the universal safe maximum — quality degrades at 1.5 on both models.
 
 ### How Flash Streaming Works
 
