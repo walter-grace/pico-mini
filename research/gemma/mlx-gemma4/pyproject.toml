@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlx-gemma4"
+version = "0.1.0"
+description = "Run Google Gemma 4 models on Apple Silicon via MLX"
+license = "MIT"
+requires-python = ">=3.9"
+dependencies = [
+    "mlx>=0.22.0",
+    "mlx-lm>=0.22.0",
+    "transformers>=4.40.0",
+    "numpy",
+    "huggingface-hub",
+]
+
+[project.scripts]
+mlx-gemma4 = "mlx_gemma4.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
