@@ -197,6 +197,7 @@ class MoESniperEngineGemma4:
             normed = layer.input_layernorm(h)
             attn_out = layer.self_attn(normed, cache=self.cache[i])
             h = h + attn_out
+            h = layer.post_attention_layernorm(h)
             mx.eval(h)
 
             # Dense MLP (always runs)

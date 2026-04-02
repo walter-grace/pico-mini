@@ -352,6 +352,7 @@ class DecoderLayer(nn.Module):
         # Attention
         self.self_attn = Attention(args, layer_idx)
         self.input_layernorm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(args.hidden_size, eps=args.rms_norm_eps)
 
         # Dense MLP
         self.mlp = DenseMLP(args)
@@ -382,6 +383,7 @@ class DecoderLayer(nn.Module):
         h = self.input_layernorm(x)
         h = self.self_attn(h, mask, cache)
         h = residual + h
+        h = self.post_attention_layernorm(h)
 
         # 2. Dense MLP
         residual = h
