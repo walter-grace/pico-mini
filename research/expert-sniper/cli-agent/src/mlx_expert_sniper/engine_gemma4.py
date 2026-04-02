@@ -184,38 +184,52 @@ class MoESniperEngineGemma4:
         self.cache = self.model.make_cache()
 
     def forward(self, input_ids):
-        """Forward pass with expert streaming from SSD."""
-        h = self.model.model.embed_tokens(input_ids)
+        """Forward pass with expert streaming from SSD.
 
-        # Create masks for both attention types
-        from mlx_lm.models.cache import KVCache, RotatingKVCache
+        Matches the fixed DecoderLayer.__call__ residual structure exactly.
+        """
+        h = self.model.model.embed_tokens(input_ids)
+        # Gemma embedding scaling
+        h = h * mx.array(self.model.args.hidden_size ** 0.5, dtype=h.dtype)
+
+        # Build masks
+        from mlx_lm.models.base import create_attention_mask
+        args = self.model.args
+        first_global = next((i for i, lt in enumerate(args.layer_types) if lt == "full_attention"), 0)
+        first_sliding = next((i for i, lt in enumerate(args.layer_types) if lt == "sliding_attention"), 0)
+        global_mask = create_attention_mask(h, self.cache[first_global])
+        sliding_mask = create_attention_mask(h, self.cache[first_sliding],
+                                              window_size=args.sliding_window)
 
         for i in range(self.num_layers):
             layer = self.model.model.layers[i]
+            is_global = args.layer_types[i] == "full_attention"
+            mask = global_mask if is_global else sliding_mask
 
-            # Attention
-            normed = layer.input_layernorm(h)
-            attn_out = layer.self_attn(normed, cache=self.cache[i])
-            h = h + attn_out
+            # 1. Attention with pre/post norms and residual
+            residual = h
+            h = layer.input_layernorm(h)
+            h = layer.self_attn(h, mask, self.cache[i])
             h = layer.post_attention_layernorm(h)
+            h = residual + h
             mx.eval(h)
 
-            # Dense MLP (always runs)
-            normed = layer.pre_feedforward_layernorm(h)
-            dense_out = layer.mlp(normed)
-            dense_normed = layer.post_feedforward_layernorm(dense_out)
+            # 2. Feed-forward
+            residual = h
+            h = layer.pre_feedforward_layernorm(h)
+            dense_out = layer.mlp(h)
 
-            # MoE block
             if layer.enable_moe_block:
-                moe_input = layer.pre_feedforward_layernorm_2(h + dense_out)
+                # Dense path
+                h_dense = layer.post_feedforward_layernorm_1(dense_out)
 
-                # Router
-                router_weights, router_indices = layer.router(moe_input)
+                # MoE: router takes residual (pre-MLP hidden states)
+                B, L, D = residual.shape
+                residual_flat = residual.reshape(-1, D)
+                router_weights, router_indices = layer.router(residual_flat)
                 mx.eval(router_weights, router_indices)
 
                 active_ids = list(set(int(e) for e in np.array(router_indices).flatten()))
-
-                # Record for co-activation
                 self.coact.record_layer(i, active_ids)
 
                 # Predictive prefetch
@@ -226,28 +240,32 @@ class MoESniperEngineGemma4:
                                     if self.reader.lru and self.reader.lru.get(i+1, eid) is None]
                         if to_fetch:
                             self.reader.prefetch_experts(i+1, to_fetch)
-
                 if i + 1 < self.num_layers:
                     self.reader.prefetch_experts(i+1, active_ids)
 
                 # Load experts from SSD
                 expert_data = self.reader.get_experts(i, active_ids)
 
+                # Expert input: pre_feedforward_layernorm_2 on residual
+                moe_input = layer.pre_feedforward_layernorm_2(residual_flat)
+
                 # Run expert FFN
                 per_expert_scale = self.per_expert_scales.get(i)
                 expert_out = run_expert_ffn_gemma4(
-                    moe_input, expert_data, router_indices, router_weights,
+                    moe_input.reshape(B, L, D), expert_data,
+                    router_indices.reshape(B, L, -1),
+                    router_weights.reshape(B, L, -1),
                     per_expert_scale=per_expert_scale)
 
-                expert_normed = layer.post_feedforward_layernorm_2(expert_out)
-                h = h + layer.post_feedforward_layernorm_1(dense_normed) + expert_normed
+                h_moe = layer.post_feedforward_layernorm_2(expert_out)
+                h = h_dense + h_moe
             else:
-                h = h + dense_normed
+                h = layer.post_feedforward_layernorm(dense_out)
 
-            # Layer scalar
+            # Residual + layer scalar
+            h = residual + h
             h = h * layer.layer_scalar
             mx.eval(h)
-            del expert_data, dense_out, normed, attn_out
             mx.clear_cache()
 
         self.coact.end_token()

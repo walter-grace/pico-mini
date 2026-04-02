@@ -12,6 +12,7 @@ Architecture: gemma4_text
 Reference: HuggingFace transformers Gemma4TextModel
 """
 
+import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -74,7 +75,19 @@ class RMSNorm(nn.Module):
         self.eps = eps
 
     def __call__(self, x: mx.array) -> mx.array:
-        return mx.fast.rms_norm(x, 1.0 + self.weight, self.eps)
+        # GGUF stores raw weights, not offsets from 1
+        return mx.fast.rms_norm(x, self.weight, self.eps)
+
+
+class BareRMSNorm(nn.Module):
+    """RMSNorm without learnable scale (used for v_norm)."""
+    def __init__(self, dims: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self._dims = dims
+
+    def __call__(self, x: mx.array) -> mx.array:
+        return mx.fast.rms_norm(x, mx.ones((self._dims,)), self.eps)
 
 
 # --------------------------------------------------------------------------- #
@@ -95,7 +108,8 @@ class Attention(nn.Module):
         super().__init__()
         self.layer_idx = layer_idx
         self.is_sliding = args.layer_types[layer_idx] == "sliding_attention"
-        self.attention_k_eq_v = args.attention_k_eq_v
+        # K=V sharing only applies to full (non-sliding) attention layers
+        self.use_kv_sharing = args.attention_k_eq_v and not self.is_sliding
 
         self.n_heads = args.num_attention_heads
 
@@ -111,17 +125,18 @@ class Attention(nn.Module):
             rope_dims = int(args.global_head_dim * args.partial_rotary_factor)
             rope_theta = args.rope_theta_global
 
-        self.scale = self.head_dim ** -0.5
+        self.scale = 1.0  # HF Gemma4 uses scaling=1.0; q_norm/k_norm handle magnitude
 
         self.q_proj = nn.Linear(args.hidden_size, self.n_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(args.hidden_size, self.n_kv_heads * self.head_dim, bias=False)
-        # v_proj exists for weight loading but K=V means we use k_proj output for V too
-        if not self.attention_k_eq_v:
+        # v_proj needed for sliding layers; dropped for full layers with K=V sharing
+        if not self.use_kv_sharing:
             self.v_proj = nn.Linear(args.hidden_size, self.n_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.n_heads * self.head_dim, args.hidden_size, bias=False)
 
         self.q_norm = RMSNorm(self.head_dim, eps=args.rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=args.rms_norm_eps)
+        self.v_norm = BareRMSNorm(self.head_dim, eps=args.rms_norm_eps)
 
         self.rope = nn.RoPE(rope_dims, traditional=False, base=rope_theta)
 
@@ -135,15 +150,17 @@ class Attention(nn.Module):
 
         queries = self.q_proj(x)
         keys = self.k_proj(x)
-        # K=V: use key projection output as values too
-        values = keys if self.attention_k_eq_v else self.v_proj(x)
+        # K=V sharing: only for full attention layers
+        values = keys if self.use_kv_sharing else self.v_proj(x)
 
         queries = queries.reshape(B, L, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
         keys = keys.reshape(B, L, self.n_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
         values = values.reshape(B, L, self.n_kv_heads, self.head_dim).transpose(0, 2, 1, 3)
 
+        # Norms: q_norm and k_norm BEFORE RoPE, v_norm on values
         queries = self.q_norm(queries)
         keys = self.k_norm(keys)
+        values = self.v_norm(values)
 
         if cache is not None:
             queries = self.rope(queries, offset=cache.offset)
@@ -198,8 +215,8 @@ class Router(nn.Module):
         self.top_k = args.top_k_experts
 
         self.proj = nn.Linear(args.hidden_size, args.num_experts, bias=False)
-        # Learnable scalar scale
-        self.scale = mx.ones((1,))
+        # Learnable per-dimension scale (shape matches hidden_size)
+        self.scale = mx.ones((args.hidden_size,))
         # Per-expert scales
         self.per_expert_scale = mx.ones((args.num_experts,))
 
@@ -378,38 +395,44 @@ class DecoderLayer(nn.Module):
         mask: Optional[mx.array] = None,
         cache: Optional[Any] = None,
     ) -> mx.array:
-        # 1. Attention
+        # 1. Attention with pre/post norms and residual
         residual = x
         h = self.input_layernorm(x)
         h = self.self_attn(h, mask, cache)
-        h = residual + h
         h = self.post_attention_layernorm(h)
-
-        # 2. Dense MLP
-        residual = h
-        dense_in = self.pre_feedforward_layernorm(h)
-        dense_out = self.mlp(dense_in)
-        h = self.post_feedforward_layernorm(dense_out)
-
-        # 3. MoE (parallel to dense, sharing the same residual)
-        if self.enable_moe_block:
-            # MoE input: norm applied to (residual + raw dense_out), not the post-normed version
-            moe_input = self.pre_feedforward_layernorm_2(residual + dense_out)
-
-            # Route
-            top_k_weights, top_k_indices = self.router(moe_input)
-
-            # Expert forward
-            expert_out = self.experts(moe_input, top_k_indices)
-            # Weighted sum over top-k experts: [B, L, top_k, D] * [B, L, top_k, 1] -> [B, L, D]
-            weighted_out = (expert_out * mx.expand_dims(top_k_weights, -1)).sum(axis=-2)
-            moe_out = self.post_feedforward_layernorm_2(weighted_out)
-
-            # Combine: dense (post-normed again) + moe
-            h = self.post_feedforward_layernorm_1(h) + moe_out
-
-        # 4. Residual + layer scalar
         h = residual + h
+
+        # 2. Feed-forward (dense MLP, optionally combined with MoE)
+        residual = h
+        h = self.pre_feedforward_layernorm(h)
+        h = self.mlp(h)
+
+        if self.enable_moe_block:
+            # Dense MLP output -> post_feedforward_layernorm_1
+            h_dense = self.post_feedforward_layernorm_1(h)
+
+            # MoE: router takes residual (pre-MLP hidden states), NOT normed
+            B, L, D = residual.shape
+            residual_flat = residual.reshape(-1, D)
+            top_k_weights, top_k_indices = self.router(residual_flat)
+
+            # Expert input: pre_feedforward_layernorm_2 applied to residual
+            moe_input = self.pre_feedforward_layernorm_2(residual_flat)
+            expert_out = self.experts(
+                moe_input.reshape(B, L, D), top_k_indices.reshape(B, L, -1)
+            )
+            # Weighted sum over top-k experts
+            top_k_weights_r = top_k_weights.reshape(B, L, -1)
+            weighted_out = (expert_out * mx.expand_dims(top_k_weights_r, -1)).sum(axis=-2)
+            h_moe = self.post_feedforward_layernorm_2(weighted_out)
+
+            # Combine dense + MoE
+            h = h_dense + h_moe
+
+        # Final post-feedforward norm + residual
+        h = self.post_feedforward_layernorm(h)
+        h = residual + h
+
         h = h * self.layer_scalar
 
         return h
@@ -540,9 +563,16 @@ class Model(nn.Module):
             if new_key.startswith("model.language_model."):
                 new_key = "model." + new_key[len("model.language_model."):]
 
-            # Drop v_proj when K=V (weights are identical to k_proj)
+            # Drop v_proj only for full attention layers with K=V sharing
+            # Sliding layers still need v_proj even when attention_k_eq_v is true
             if self.args.attention_k_eq_v and "v_proj" in new_key:
-                continue
+                # Extract layer index to check if it's a full attention layer
+                layer_match = re.search(r'layers\.(\d+)\.', new_key)
+                if layer_match:
+                    layer_idx = int(layer_match.group(1))
+                    if self.args.layer_types[layer_idx] != "sliding_attention":
+                        continue  # Drop v_proj for full attention layers
+                # If no layer index found, keep the weight
 
             # Drop lm_head when tied
             if self.args.tie_word_embeddings and new_key == "lm_head.weight":
