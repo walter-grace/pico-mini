@@ -58,6 +58,15 @@ def load_model(model_path, max_memory_gb=None):
         hidden_size_per_layer_input=tc.get("hidden_size_per_layer_input", 0) or 0,
     )
 
+    # Set norm mode: GGUF-converted weights use raw multipliers
+    from . import model as model_mod
+    if config.get("quantization"):
+        # Our converted models come from GGUF (norm_shift=0)
+        model_mod._NORM_MODE = "gguf"
+    else:
+        # Direct HF models use offset from 1.0
+        model_mod._NORM_MODE = "hf"
+
     # Create model
     model = Model(args)
 
@@ -168,6 +177,9 @@ def _map_gguf_key(key):
 
 def _load_from_gguf(gguf_path):
     """Load Gemma 4 directly from a GGUF file."""
+    from . import model as model_mod
+    model_mod._NORM_MODE = "gguf"
+
     print(f"Loading GGUF: {gguf_path}")
     t0 = time.time()
 

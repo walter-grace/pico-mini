@@ -61,6 +61,8 @@ class ModelArgs(BaseModelArgs):
     num_kv_shared_layers: int = 0
     # Per-layer embedding (PLE): injects per-layer input before attention
     hidden_size_per_layer_input: int = 0
+    # Norm mode: "gguf" uses w*norm(x), "hf" uses (1+w)*norm(x)
+    norm_mode: str = "gguf"
     # RoPE
     rope_theta_sliding: float = 10_000.0
     rope_theta_global: float = 1_000_000.0
@@ -71,18 +73,22 @@ class ModelArgs(BaseModelArgs):
 # Norms
 # --------------------------------------------------------------------------- #
 
+# Global norm mode — set before creating model
+_NORM_MODE = "gguf"  # "gguf" = w*norm(x), "hf" = (1+w)*norm(x)
+
 class RMSNorm(nn.Module):
-    """Gemma-style RMSNorm: weight is (1 + w) * rms_norm(x)."""
+    """Gemma-style RMSNorm. Mode controls weight interpretation."""
     def __init__(self, dims: int, eps: float = 1e-6):
         super().__init__()
         self.weight = mx.ones((dims,))
         self.eps = eps
 
     def __call__(self, x: mx.array) -> mx.array:
-        # HuggingFace Gemma 4: weights are offsets from 1.0, use (1+w)
-        # GGUF Gemma 4 (norm_shift=0.0): weights are final multipliers, use w
-        # Default to (1+w) for HF compatibility; the sniper engine overrides for GGUF
-        return mx.fast.rms_norm(x, 1.0 + self.weight, self.eps)
+        if _NORM_MODE == "hf":
+            return mx.fast.rms_norm(x, 1.0 + self.weight, self.eps)
+        else:
+            # GGUF norm_shift=0.0: weights are final multipliers
+            return mx.fast.rms_norm(x, self.weight, self.eps)
 
 
 class BareRMSNorm(nn.Module):
@@ -610,6 +616,13 @@ class Model(nn.Module):
                 up_v = v[:, half:]
                 new_weights[base + "experts.switch_glu.gate_proj" + suffix] = gate_v
                 new_weights[base + "experts.switch_glu.up_proj" + suffix] = up_v
+                continue
+
+            # Map per-expert scale to router
+            if new_key.endswith("experts.down_proj.scale"):
+                # This is the per-expert scale, not a quantization scale
+                new_key = new_key.replace("experts.down_proj.scale", "router.per_expert_scale")
+                new_weights[new_key] = v
                 continue
 
             # Map experts.down_proj → experts.switch_glu.down_proj
