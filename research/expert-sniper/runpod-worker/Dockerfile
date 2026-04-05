@@ -15,7 +15,7 @@ RUN apt-get update -qq && \
     apt-get install -y -qq cmake git python3 && \
     rm -rf /var/lib/apt/lists/*
 
-# Clone latest llama.cpp
+# Clone latest llama.cpp — patches are version-tolerant
 RUN git clone --depth 1 https://github.com/ggml-org/llama.cpp.git /build/llama.cpp
 
 # Copy Expert Sniper files
