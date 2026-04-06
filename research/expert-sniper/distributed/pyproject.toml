@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mac-tensor"
+version = "0.1.0"
+description = "Distributed MoE inference across multiple Macs"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "mlx>=0.22.0",
+    "mlx-lm>=0.22.0",
+    "numpy",
+    "fastapi",
+    "uvicorn",
+    "requests",
+    "transformers",
+    "tokenizers",
+    "huggingface_hub",
+]
+
+[project.scripts]
+mac-tensor = "mac_tensor.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["mac_tensor*"]

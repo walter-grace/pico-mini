@@ -60,7 +60,39 @@ See [mlx-sniper/README.md](../mlx-sniper/README.md) for the single-machine setup
 - You want all experts in RAM (zero SSD latency, no cache misses)
 - You're running a cloud fleet (e.g., Scaleway Mac Minis at $0.13/hr each)
 
-## Quick Start (Distributed)
+## Install
+
+```bash
+cd distributed/
+pip install -e .
+```
+
+This gives you the `mac-tensor` CLI. Or run directly with `python3 -m mac_tensor`.
+
+## Quick Start (CLI)
+
+```bash
+# See supported models
+mac-tensor info
+
+# Download model (on each Mac)
+mac-tensor download --model qwen35
+
+# Split for distributed use (on each Mac, Qwen only)
+mac-tensor split --model qwen35
+
+# Start expert nodes
+mac-tensor node --model qwen35 --partition 0-127 --port 8301    # Mac 2
+mac-tensor node --model qwen35 --partition 128-255 --port 8301  # Mac 3
+
+# Check nodes are ready
+mac-tensor health --nodes http://mac2:8301,http://mac3:8301
+
+# Chat!
+mac-tensor chat --model qwen35 --nodes http://mac2:8301,http://mac3:8301
+```
+
+## Quick Start (Manual)
 
 ### Requirements
 - 2-3 Macs with Apple Silicon (M1/M2/M3/M4), 16 GB RAM each
@@ -226,7 +258,7 @@ Ideas we're exploring (PRs welcome!):
 
 ## Roadmap
 
-- [ ] CLI tool: `mac-tensor start --model qwen35 --nodes mac2,mac3`
+- [x] CLI tool: `mac-tensor node`, `mac-tensor chat`, `mac-tensor health`
 - [ ] Auto-discovery of Macs on local network
 - [ ] Agent mode with tool use
 - [ ] Support for more MoE models (Mixtral, DeepSeek, etc.)
