@@ -431,18 +431,34 @@ def cmd_status(args):
 
 
 def cmd_chat(args):
-    """Start interactive chat — connects to running expert nodes."""
-    cfg = require_config()
-    model_key = args.model or cfg.get("model", "qwen35")
+    """Start interactive chat — connects to running expert nodes.
+
+    Two modes:
+      1. With --nodes: connect directly without needing a saved cluster
+      2. Without --nodes: use the saved cluster config (init/up flow)
+    """
+    cfg = load_config() or {}
+
+    # If user passed --nodes explicitly, run in standalone mode (no config required)
+    if args.nodes:
+        node_urls = args.nodes
+        model_key = args.model or "qwen35"
+        coordinator = None
+    else:
+        # Fall back to saved cluster config
+        if not cfg:
+            print("No cluster configured and no --nodes provided.")
+            print("Either run 'mac-tensor init' first, or pass --nodes directly:")
+            print("  mac-tensor chat --model gemma4 --nodes http://mac2:8401,http://mac3:8401")
+            sys.exit(1)
+        node_urls = ",".join(cfg.get("node_urls", []))
+        if not node_urls:
+            print("No nodes running. Run 'mac-tensor up' first.")
+            sys.exit(1)
+        model_key = args.model or cfg.get("model", "qwen35")
+        coordinator = cfg.get("coordinator")
+
     model = get_model(model_key)
-
-    # Get node URLs from config or args
-    node_urls = args.nodes or ",".join(cfg.get("node_urls", []))
-    if not node_urls:
-        print("No nodes configured. Run 'mac-tensor up' first.")
-        sys.exit(1)
-
-    coordinator = cfg.get("coordinator")
     script = model["coordinator_script"]
     max_tokens = args.max_tokens or 300
     temperature = args.temperature or 0.7
