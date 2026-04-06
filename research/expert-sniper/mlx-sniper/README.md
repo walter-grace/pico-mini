@@ -41,10 +41,25 @@ mlx-sniper profile ~/models/qwen3-30b --tokens 100
 
 | Model | Size | Experts | tok/s (M4 16GB) | Status |
 |-------|------|---------|-----------------|--------|
-| Qwen3.5-35B-A3B | 19.5 GB | 256/layer | 5.4 tok/s | Verified |
-| Qwen3-30B-A3B | 17.2 GB | 128/layer | 3.3 tok/s | Verified |
+| Qwen3.5-35B-A3B | 19.5 GB | 256/layer | 5.37 tok/s | Verified |
+| Qwen3-30B-A3B | 17.2 GB | 128/layer | 3.34 tok/s | Verified |
+| **Gemma 4-26B-A4B** | 15.6 GB | 128/layer | **4.15 tok/s** | Verified (mixed quant: experts 4-bit, MLP 8-bit) |
 
 More models coming. To request a model, open an issue.
+
+### Memory Bandwidth Scaling
+
+MoE inference is bandwidth-bound. Expected speeds on different Macs:
+
+| Mac | Memory BW | Qwen 35B est. | Gemma 4-26B est. |
+|-----|-----------|---------------|------------------|
+| M2 Mac Mini | 100 GB/s | ~4.5 tok/s | ~3.5 tok/s |
+| **M4 Mac Mini** | **120 GB/s** | **5.37 tok/s** ✓ | **4.15 tok/s** ✓ |
+| M2 Pro Mac Mini | 200 GB/s | ~8-10 tok/s | ~7-8 tok/s |
+| M4 Pro Mac Mini | 273 GB/s | ~12-14 tok/s | ~10-11 tok/s |
+| M2 Max Studio | 400 GB/s | ~16-20 tok/s | ~14-17 tok/s |
+| M4 Max MacBook Pro | 546 GB/s | ~22-28 tok/s | ~18-23 tok/s |
+| M2 Ultra Studio | 800 GB/s | ~30-40 tok/s | ~25-32 tok/s |
 
 ### Hardware Requirements
 

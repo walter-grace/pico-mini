@@ -35,43 +35,74 @@ MoE (Mixture-of-Experts) models only activate ~3% of parameters per token. The o
 
 ### Test Hardware
 
-All results measured on 3 identical Scaleway Mac Minis in the `fr-par-1` datacenter:
+**Distributed (3 nodes)** — Scaleway Mac Minis in `fr-par-1` datacenter:
 
 | Spec | Value |
 |------|-------|
 | Machine | Mac Mini (Mac14,3) |
 | Chip | Apple M2 |
 | CPU | 8 cores (4 performance + 4 efficiency) |
-| Memory | 16 GB unified (100 GB/s bandwidth) |
-| Storage | 256 GB SSD |
+| Memory | 16 GB unified, **100 GB/s bandwidth** |
+| Storage | 256 GB SSD (~5 GB/s read) |
 | Network | Scaleway internal — same datacenter, ~6ms RTT between nodes |
-| OS | macOS (Darwin) |
-| Cost | ~$0.13/hr per node ($0.40/hr total for 3) |
+| Cost | ~$0.13/hr per node ($0.40/hr total) |
 
-These are the **cheapest Apple Silicon machines you can rent**. The M2 has 100 GB/s memory bandwidth — much lower than M2 Pro (200 GB/s), M2 Max (400 GB/s), or M4 (120 GB/s). On faster hardware or a LAN/Thunderbolt connection, expect significantly better results.
+**Single Mac (sniper)** — Local M4 Mac Mini:
 
-### Expected Scaling
+| Spec | Value |
+|------|-------|
+| Machine | Mac Mini (Mac16,10) |
+| Chip | Apple M4 |
+| CPU | 10 cores (4 performance + 6 efficiency) |
+| Memory | 16 GB unified, **120 GB/s bandwidth** |
+| Storage | 256 GB NVMe (~5 GB/s read) |
 
-| Setup | Est. Speed | Why |
-|-------|-----------|-----|
-| 3x Scaleway M2 (cloud, ~6ms RTT) | 1.30 tok/s | Current baseline |
-| 3x Mac Mini on home LAN (~0.3ms RTT) | ~3-5 tok/s | 20x lower network latency |
-| 2x Mac via Thunderbolt (~0.05ms RTT) | ~5-8 tok/s | Near-zero latency |
-| 3x M4 Mac Mini on LAN | ~4-7 tok/s | Faster compute + lower latency |
-| 4+ nodes | Higher | More parallelism, less work per node |
+### Memory Bandwidth Matters Most
 
-These are estimates based on our profiling (62% of time is network, 38% is local compute). We haven't tested LAN/Thunderbolt yet — **if you do, please share your results!**
+For MoE inference, **memory bandwidth is the dominant performance factor**. Each token reads ~3-5 GB of expert weights — your tok/s is roughly bounded by `bandwidth / data_per_token`.
+
+| Mac | Memory BW | Cost | Expected Qwen 3.5-35B (single) |
+|-----|-----------|------|--------------------------------|
+| M2 Mac Mini | 100 GB/s | $599 | ~5 tok/s |
+| **M4 Mac Mini** | **120 GB/s** | **$599** | **5.37 tok/s** ✓ verified |
+| M2 Pro Mac Mini | 200 GB/s | $1299 | ~8-10 tok/s |
+| M4 Pro Mac Mini | 273 GB/s | $1399 | ~12-14 tok/s |
+| M2 Max Studio | 400 GB/s | $1999 | ~16-20 tok/s |
+| M2 Ultra Studio | 800 GB/s | $3999 | ~30-40 tok/s |
+| M4 Max MacBook Pro | 546 GB/s | $3199 | ~22-28 tok/s |
+
+These are estimates extrapolated from our M4 baseline. The key insight: **a single M2 Pro or better runs 35B at usable speeds**, no distributed setup needed. Distributed only makes sense when you need to pool RAM across multiple machines for models that don't fit even with SSD streaming (e.g., 70B+, 122B, 235B).
+
+### Expected Scaling — Distributed
+
+The current 1.30 tok/s on 3 Scaleway Macs is bottlenecked by **network latency**, not compute (62% of time is HTTP round trips, 38% is local compute). Faster networking helps a lot:
+
+| Network Setup | Est. Speed | Why |
+|---------------|-----------|-----|
+| Scaleway cloud (~6ms RTT) | 1.30 tok/s | Current baseline |
+| Home LAN, Gigabit (~0.3ms RTT) | ~3-5 tok/s | 20x lower network latency |
+| Thunderbolt Bridge (~0.05ms RTT) | ~5-8 tok/s | Near-zero latency |
+| 3x M4 on LAN | ~6-9 tok/s | Faster compute + lower latency |
+| 3x M4 Pro on Thunderbolt | ~10-15 tok/s | Maximum realistic on Mac Mini class |
+
+We haven't tested LAN/Thunderbolt yet — **if you do, please share your results!**
 
 > **These speeds are not fast yet.** We know. The bottleneck is 30-40 sequential HTTP round trips per token over the network. We're actively optimizing (raw TCP, pipelining, better batching) and **open-sourcing so the community can help push this further.** If you have ideas — open an issue or PR.
 
-## Single Mac? Use mlx-sniper Instead
+## Single Mac? Use mlx-sniper Instead (faster!)
 
-If you only have **one Mac**, you don't need the distributed setup. The single-machine Expert Sniper streams experts from SSD and is significantly faster:
+If you only have **one Mac**, you don't need distributed. The single-machine Expert Sniper streams experts from SSD with an LRU cache and is significantly faster:
 
-| Setup | Speed | Hardware |
-|-------|-------|----------|
-| **Single Mac (mlx-sniper)** | **5.37 tok/s** | 1x M4 Mac Mini 16 GB |
-| Distributed (mac-tensor) | 1.30 tok/s | 3x Mac Mini M2 16 GB |
+| Setup | Hardware | Memory BW | Qwen 3.5-35B | Gemma 4-26B |
+|-------|----------|-----------|--------------|-------------|
+| **Single M4 Mac Mini** | 1× M4 16GB | 120 GB/s | **5.37 tok/s** | **4.15 tok/s** |
+| Distributed (3 nodes) | 3× M2 16GB | 100 GB/s each | 1.30 tok/s | 1.23 tok/s |
+
+The single M4 is **3-4x faster** than the 3-node M2 cluster because:
+- M4 has 120 GB/s memory bandwidth (vs M2's 100 GB/s)
+- No network round trips — experts stream directly from local NVMe
+- LRU cache hits ~95-98% of expert reads
+- M4's faster compute overlaps SSD reads efficiently
 
 ```bash
 # Single Mac — just install and go
@@ -79,7 +110,7 @@ cd ../mlx-sniper && pip install -e .
 mlx-sniper chat ~/models/qwen3-30b
 ```
 
-See [mlx-sniper/README.md](../mlx-sniper/README.md) for the single-machine setup. It supports Qwen3-30B, Qwen3.5-35B, and more via SSD expert streaming with LRU cache + routing bias.
+See [mlx-sniper/README.md](../mlx-sniper/README.md) for the single-machine setup. Supports Qwen 3.5-35B, Qwen 3-30B, Gemma 4-26B, and more.
 
 **When to use distributed (mac-tensor) instead:**
 - You have multiple cheap Macs and want to pool their RAM

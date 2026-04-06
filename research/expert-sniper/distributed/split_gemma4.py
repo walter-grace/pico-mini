@@ -1,265 +1,205 @@
 #!/usr/bin/env python3
 """
-Split Gemma 4 MLX model into expert layer files + pinned weights.
+Split Gemma 4 SwitchLinear stacked experts into per-expert bin files.
 
-Takes the mlx-community/gemma-4-26b-a4b-it-4bit safetensors and creates:
-  - pinned.safetensors: attention, embeddings, norms, shared layers (~2-3 GB)
-  - bin/layer_XX.bin: expert weights per layer (~400 MB each, 30 files)
-
-Usage:
-  python split_gemma4.py \
-    --input ~/models/gemma4-26b-4bit \
-    --output ~/models/gemma4-26b-stream
+Gemma 4 stores experts as (128, out, in) stacked tensors.
+This script unstacks them into the layer_XX.bin format that expert_io.py reads.
 """
-
-import argparse
-import json
-import os
-import struct
-import time
-
+import os, json, gc, time, glob, argparse
 import numpy as np
 import mlx.core as mx
 
+PAGE_SIZE = 16384
 
-def load_all_weights(model_dir):
-    """Load all safetensors files from model directory."""
-    import glob
-    weights = {}
-    for sf in sorted(glob.glob(os.path.join(model_dir, "model*.safetensors"))):
-        print(f"  Loading {os.path.basename(sf)}...")
-        w = mx.load(sf)
-        weights.update(w)
-    return weights
+def main():
+    parser = argparse.ArgumentParser(description="Split Gemma 4 for Expert Sniper")
+    parser.add_argument("--input", "-i", default="~/models/gemma4-26b-4bit")
+    parser.add_argument("--output", "-o", default="~/models/gemma4-stream")
+    args = parser.parse_args()
 
+    INPUT_DIR = os.path.expanduser(args.input)
+    OUTPUT_DIR = os.path.expanduser(args.output)
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(f"{OUTPUT_DIR}/bin", exist_ok=True)
 
-def identify_expert_keys(weights):
-    """Identify which keys are expert weights vs pinned weights.
+    config = json.load(open(f"{INPUT_DIR}/config.json"))
+    tc = config.get("text_config", config)
+    NUM_LAYERS = tc["num_hidden_layers"]
+    NUM_EXPERTS = tc["num_experts"]
 
-    Gemma 4 expert keys follow pattern:
-      text_model.model.layers.X.block_sparse_moe.experts.Y.{gate_proj,up_proj,down_proj}.{weight,scales,biases}
+    print(f"Gemma 4 Split (SwitchLinear unstack)")
+    print(f"  Input:   {INPUT_DIR}")
+    print(f"  Output:  {OUTPUT_DIR}")
+    print(f"  Layers:  {NUM_LAYERS}, Experts: {NUM_EXPERTS}")
+    print()
 
-    Everything else is pinned (attention, norms, embeddings, router, etc).
-    """
-    expert_keys = {}   # (layer_idx, expert_idx) → {tensor_name: key}
-    pinned_keys = {}   # key → True
+    # Load all weights
+    print("Loading safetensors...")
+    t0 = time.time()
+    all_weights = {}
+    for sf in sorted(glob.glob(f"{INPUT_DIR}/model-*.safetensors")):
+        print(f"  {os.path.basename(sf)}")
+        all_weights.update(mx.load(sf))
 
-    for key in weights:
-        # Check if this is an expert weight
-        # Pattern: ...layers.X.block_sparse_moe.experts.Y.proj.component
-        parts = key.split(".")
+    # Identify expert and pinned keys
+    pinned = {}
+    expert_tensors = {}  # layer_idx -> {tensor_name: (128, ...)}
+
+    EXPERT_PREFIX = "language_model.model.layers.{}.experts.switch_glu.{}.{}"
+    PROJ_NAMES = ["gate_proj", "up_proj", "down_proj"]
+    COMP_NAMES = ["weight", "scales", "biases"]
+
+    for key, val in all_weights.items():
         is_expert = False
-        for i, p in enumerate(parts):
-            if p == "experts" and i + 1 < len(parts):
-                # Found expert weight
-                layer_str = None
-                for j in range(i):
-                    if parts[j] == "layers" and j + 1 < len(parts):
-                        layer_str = parts[j + 1]
+        for li in range(NUM_LAYERS):
+            for proj in PROJ_NAMES:
+                for comp in COMP_NAMES:
+                    expected = EXPERT_PREFIX.format(li, proj, comp)
+                    if key == expected:
+                        if li not in expert_tensors:
+                            expert_tensors[li] = {}
+                        # Store with the name format expert_io expects
+                        tensor_name = f"switch_mlp.{proj}.{comp}"
+                        expert_tensors[li][tensor_name] = val
+                        is_expert = True
                         break
-                if layer_str is not None:
-                    layer_idx = int(layer_str)
-                    expert_idx = int(parts[i + 1])
-                    # Tensor name: everything after expert_idx
-                    tensor_name = ".".join(parts[i + 2:])
-                    if (layer_idx, expert_idx) not in expert_keys:
-                        expert_keys[(layer_idx, expert_idx)] = {}
-                    expert_keys[(layer_idx, expert_idx)][tensor_name] = key
-                    is_expert = True
+                if is_expert:
+                    break
+            if is_expert:
                 break
-
         if not is_expert:
-            pinned_keys[key] = True
+            pinned[key] = val
 
-    return expert_keys, pinned_keys
+    print(f"\n  Expert layers: {len(expert_tensors)}")
+    print(f"  Pinned keys: {len(pinned)}")
 
+    # Determine per-expert block layout from first layer
+    first_layer = expert_tensors[0]
+    tensor_layout = {}
+    inner_offset = 0
 
-def build_layer_files(weights, expert_keys, output_dir, num_layers, num_experts):
-    """Create layer_XX.bin files with expert data."""
+    for tname in sorted(first_layer.keys()):
+        arr = first_layer[tname]
+        # Shape is (128, ...) — per-expert shape is arr.shape[1:]
+        per_expert_shape = list(arr.shape[1:])
+        # dtype
+        if arr.dtype == mx.uint32:
+            dtype_str = "uint32"
+            elem_size = 4
+        elif arr.dtype == mx.bfloat16:
+            dtype_str = "bfloat16"
+            elem_size = 2
+        elif arr.dtype == mx.float16:
+            dtype_str = "float16"
+            elem_size = 2
+        elif arr.dtype == mx.float32:
+            dtype_str = "float32"
+            elem_size = 4
+        else:
+            dtype_str = str(arr.dtype).replace("mlx.core.", "")
+            elem_size = 2
 
-    bin_dir = os.path.join(output_dir, "bin")
-    os.makedirs(bin_dir, exist_ok=True)
+        nbytes = 1
+        for d in per_expert_shape:
+            nbytes *= d
+        nbytes *= elem_size
 
-    PAGE_SIZE = 16384
+        tensor_layout[tname] = {
+            "inner_offset": inner_offset,
+            "nbytes": nbytes,
+            "shape_per_expert": per_expert_shape,
+            "dtype": dtype_str,
+        }
+        inner_offset += nbytes
 
-    for layer_idx in range(num_layers):
-        # Collect all experts for this layer
-        layer_experts = {}
-        for (l, e), tensors in expert_keys.items():
-            if l == layer_idx:
-                layer_experts[e] = tensors
+    expert_block_size = inner_offset
+    data_start = PAGE_SIZE
 
-        if not layer_experts:
-            print(f"  Layer {layer_idx}: no experts found, skipping")
-            continue
+    print(f"  Expert block: {expert_block_size} bytes ({expert_block_size/1024:.1f} KB)")
+    print()
 
-        # Determine tensor layout from first expert
-        first_expert = layer_experts[min(layer_experts.keys())]
-        tensor_layout = {}
-        inner_offset = 0
+    # Write layer files
+    total_expert_bytes = 0
+    for layer_idx in range(NUM_LAYERS):
+        lt = time.time()
+        layer_data = expert_tensors[layer_idx]
 
-        for tensor_name in sorted(first_expert.keys()):
-            key = first_expert[tensor_name]
-            arr = weights[key]
-            nbytes = arr.nbytes
-            shape = list(arr.shape)
-            dtype = str(arr.dtype).replace("mlx.core.", "")
-
-            tensor_layout[tensor_name] = {
-                "inner_offset": inner_offset,
-                "nbytes": nbytes,
-                "shape_per_expert": shape,
-                "dtype": dtype,
-            }
-            inner_offset += nbytes
-
-        expert_block_size = inner_offset
-        data_start = PAGE_SIZE
-
-        # Build header
         header = {
             "format": "expert_sniper_v1",
             "model": "gemma4-26b-a4b",
             "layer_idx": layer_idx,
-            "num_experts": num_experts,
+            "num_experts": NUM_EXPERTS,
             "layout": {
                 "expert_block_size": expert_block_size,
                 "data_start": data_start,
                 "tensors": tensor_layout,
             }
         }
-
         header_bytes = json.dumps(header, indent=2).encode("utf-8")
-        assert len(header_bytes) < PAGE_SIZE, f"Header too large: {len(header_bytes)} bytes"
+        assert len(header_bytes) < PAGE_SIZE
         header_padded = header_bytes + b"\x00" * (PAGE_SIZE - len(header_bytes))
 
-        # Write layer file
-        layer_path = os.path.join(bin_dir, f"layer_{layer_idx:02d}.bin")
+        layer_path = f"{OUTPUT_DIR}/bin/layer_{layer_idx:02d}.bin"
         with open(layer_path, "wb") as f:
             f.write(header_padded)
 
-            for expert_idx in range(num_experts):
-                if expert_idx in layer_experts:
-                    tensors = layer_experts[expert_idx]
-                    expert_data = bytearray()
-                    for tensor_name in sorted(tensors.keys()):
-                        key = tensors[tensor_name]
-                        arr = weights[key]
-                        # Convert to numpy for raw bytes
-                        if arr.dtype == mx.uint32:
-                            np_arr = np.array(arr).view(np.uint32)
-                        elif arr.dtype == mx.bfloat16:
-                            np_arr = np.array(arr.astype(mx.float16)).view(np.uint16)
-                        elif arr.dtype == mx.float32:
-                            np_arr = np.array(arr).view(np.float32)
-                        elif arr.dtype == mx.float16:
-                            np_arr = np.array(arr).view(np.float16)
-                        else:
-                            np_arr = np.array(arr)
-                        expert_data.extend(np_arr.tobytes())
+            for eid in range(NUM_EXPERTS):
+                expert_data = bytearray()
+                for tname in sorted(tensor_layout.keys()):
+                    stacked = layer_data[tname]  # (128, ...)
+                    single = stacked[eid]  # (...)
+                    mx.eval(single)
 
-                    # Pad to exact block size
-                    if len(expert_data) < expert_block_size:
-                        expert_data.extend(b"\x00" * (expert_block_size - len(expert_data)))
-                    f.write(bytes(expert_data[:expert_block_size]))
-                else:
-                    # Empty expert slot
-                    f.write(b"\x00" * expert_block_size)
+                    if single.dtype == mx.uint32:
+                        np_arr = np.array(single).view(np.uint32)
+                    elif single.dtype == mx.bfloat16:
+                        np_arr = np.array(single.view(mx.uint16))
+                    elif single.dtype == mx.float32:
+                        np_arr = np.array(single).view(np.float32)
+                    elif single.dtype == mx.float16:
+                        np_arr = np.array(single).view(np.uint16)
+                    else:
+                        np_arr = np.array(single)
+                    expert_data.extend(np_arr.tobytes())
+
+                # Pad to exact block size
+                if len(expert_data) < expert_block_size:
+                    expert_data.extend(b"\x00" * (expert_block_size - len(expert_data)))
+                f.write(bytes(expert_data[:expert_block_size]))
 
         file_size = os.path.getsize(layer_path)
-        print(f"  Layer {layer_idx:2d}: {len(layer_experts)} experts, "
-              f"block={expert_block_size} bytes, file={file_size/1e6:.1f} MB")
+        total_expert_bytes += file_size
+        elapsed = time.time() - lt
+        print(f"  Layer {layer_idx:2d}/{NUM_LAYERS}: {file_size/1e6:.1f} MB ({elapsed:.0f}s)")
 
-    return expert_block_size
+        # Free this layer's expert data
+        del expert_tensors[layer_idx]
+        gc.collect()
 
-
-def save_pinned(weights, pinned_keys, output_dir):
-    """Save non-expert weights to pinned.safetensors."""
-    pinned = {k: weights[k] for k in pinned_keys}
-
-    pinned_path = os.path.join(output_dir, "pinned.safetensors")
+    # Save pinned
+    pinned_path = f"{OUTPUT_DIR}/pinned.safetensors"
     mx.save_safetensors(pinned_path, pinned)
+    pinned_bytes = sum(v.nbytes for v in pinned.values())
+    print(f"\nSaved pinned.safetensors: {pinned_bytes/1e9:.2f} GB ({len(pinned)} keys)")
 
-    size = os.path.getsize(pinned_path) / 1e9
-    print(f"  Pinned weights: {len(pinned)} tensors, {size:.1f} GB")
-    return size
+    # Config for streaming
+    stream_config = dict(tc)
+    stream_config["quantization"] = config.get("quantization", {"bits": 4, "group_size": 64})
+    stream_config["streaming"] = {"pinned_file": "pinned.safetensors", "expert_dir": "bin"}
+    with open(f"{OUTPUT_DIR}/config.json", "w") as f:
+        json.dump(stream_config, f, indent=2)
 
-
-def main():
-    parser = argparse.ArgumentParser(description="Split Gemma 4 for distributed Expert Sniper")
-    parser.add_argument("--input", required=True, help="Input model directory")
-    parser.add_argument("--output", required=True, help="Output directory for split model")
-    args = parser.parse_args()
-
-    os.makedirs(args.output, exist_ok=True)
-
-    # Load config
-    config_path = os.path.join(args.input, "config.json")
-    with open(config_path) as f:
-        config = json.load(f)
-
-    text_config = config.get("text_config", config)
-    num_layers = text_config["num_hidden_layers"]
-    num_experts = text_config["num_experts"]
-
-    print(f"Gemma 4 Split Tool")
-    print(f"  Layers: {num_layers}, Experts: {num_experts}")
-    print(f"  Input: {args.input}")
-    print(f"  Output: {args.output}")
-    print()
-
-    # Load all weights
-    print("Loading model weights...")
-    t0 = time.time()
-    weights = load_all_weights(args.input)
-    print(f"  Loaded {len(weights)} tensors in {time.time()-t0:.1f}s")
-    print()
-
-    # Identify expert vs pinned keys
-    expert_keys, pinned_keys = identify_expert_keys(weights)
-    n_expert_tensors = sum(len(v) for v in expert_keys.values())
-    print(f"Expert tensors: {n_expert_tensors} ({len(expert_keys)} expert slots)")
-    print(f"Pinned tensors: {len(pinned_keys)}")
-    print()
-
-    # Save pinned weights
-    print("Saving pinned weights...")
-    save_pinned(weights, pinned_keys, args.output)
-    print()
-
-    # Build layer files
-    print("Building expert layer files...")
-    block_size = build_layer_files(weights, expert_keys, args.output, num_layers, num_experts)
-    print()
-
-    # Copy config and tokenizer files
-    for fname in ["config.json", "tokenizer.json", "tokenizer_config.json",
-                   "generation_config.json", "chat_template.jinja", "processor_config.json"]:
-        src = os.path.join(args.input, fname)
+    # Copy tokenizer files
+    import shutil
+    for tf in ["tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
+               "generation_config.json", "processor_config.json"]:
+        src = f"{INPUT_DIR}/{tf}"
         if os.path.exists(src):
-            import shutil
-            shutil.copy2(src, os.path.join(args.output, fname))
+            shutil.copy(src, f"{OUTPUT_DIR}/{tf}")
 
-    # Write sniper config
-    sniper_config = {
-        "version": 1,
-        "model": "gemma4-26b-a4b",
-        "model_dir": args.output,
-        "num_layers": num_layers,
-        "num_experts": num_experts,
-        "top_k": text_config.get("top_k_experts", 8),
-        "expert_block_bytes": block_size,
-        "hidden_size": text_config["hidden_size"],
-        "moe_intermediate_size": text_config.get("moe_intermediate_size", 704),
-    }
-    with open(os.path.join(args.output, "sniper_config.json"), "w") as f:
-        json.dump(sniper_config, f, indent=2)
-
-    print(f"Split complete! Output at {args.output}")
-    print(f"  pinned.safetensors — non-expert weights")
-    print(f"  bin/layer_XX.bin — expert weights ({num_layers} files)")
-    print(f"  sniper_config.json — sniper configuration")
-
+    elapsed = time.time() - t0
+    print(f"\nDone in {elapsed:.0f}s!")
+    print(f"Pinned: {pinned_bytes/1e9:.2f} GB, Experts: {total_expert_bytes/1e9:.2f} GB")
 
 if __name__ == "__main__":
     main()
