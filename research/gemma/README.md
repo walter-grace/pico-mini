@@ -118,6 +118,33 @@ mlx-sniper download gemma4-26b  # experimental
 mlx-sniper run ~/models/gemma4-26b-stream -p "What is the capital of France?" -v
 ```
 
+## Vision Agent (Gemma 4 + Falcon Perception)
+
+For the **vision-capable deploy** — Gemma 4 for reasoning + Falcon Perception for grounded segmentation, both on a single 16 GB Mac with one CLI command — see:
+
+**[`research/expert-sniper/distributed/`](../expert-sniper/distributed/)**
+
+The mac_tensor package in `distributed/` includes a `--vision --falcon` mode that:
+- Loads Gemma 4 26B-A4B via the Expert Sniper (~3 GB resident, streams from SSD)
+- Loads Falcon Perception 0.6B via mlx-vlm (~1.5 GB resident)
+- Serves a chat UI on `http://localhost:8500`
+- Exposes `/api/chat_vision`, `/api/falcon`, `/api/turbo_chat` REST endpoints
+- Total RAM under 6 GB resident on a 16 GB Mac
+
+### Quick launch (assumes you've already split Gemma 4 — see distributed README)
+
+```bash
+cd research/expert-sniper/distributed
+python3 -m mac_tensor.cli ui --vision --falcon \
+    --stream-dir ~/models/gemma4-stream \
+    --source-dir ~/models/gemma4-source \
+    --port 8500
+```
+
+Open `http://localhost:8500` — drop an image, ask Gemma to describe it, click **Ground** for Falcon to outline objects precisely.
+
+The full install path (clone + split + launch) is documented in [distributed/README.md → Vision Agent](../expert-sniper/distributed/README.md#vision-agent--gemma-4--falcon-perception-on-a-single-mac).
+
 ## Model source
 
 - GGUF: [unsloth/gemma-4-26B-A4B-it-GGUF](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF)

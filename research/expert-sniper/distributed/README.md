@@ -118,6 +118,91 @@ See [mlx-sniper/README.md](../mlx-sniper/README.md) for the single-machine setup
 - You want all experts in RAM (zero SSD latency, no cache misses)
 - You're running a cloud fleet (e.g., Scaleway Mac Minis at $0.13/hr each)
 
+## Vision Agent — Gemma 4 + Falcon Perception on a Single Mac
+
+`mac-tensor` also runs a **single-machine vision agent** that pairs Gemma 4 (reasoning + image description) with Falcon Perception (pixel-precise grounded segmentation). One CLI command brings up both models behind a web chat UI on `http://localhost:8500`.
+
+```
+┌────────────────────────────────────────────────┐
+│  http://localhost:8500   (chat UI + REST API)  │
+├────────────────────────────────────────────────┤
+│  /api/chat_vision   chained Gemma → Falcon     │
+│  /api/falcon        direct grounding endpoint  │
+│  /api/turbo_chat    Gemma vision → Qwen brain  │
+└─────────────┬──────────────────────────────────┘
+              │
+   ┌──────────┴──────────┐
+   │                     │
+   ▼                     ▼
+┌────────────────┐  ┌──────────────────────┐
+│ Gemma 4-26B    │  │ Falcon Perception    │
+│ A4B vision     │  │ 0.6B segmentation    │
+│ ~2-3 GB resident│  │ ~1.5 GB resident     │
+│ via mlx-sniper │  │ via mlx-vlm          │
+│ (SSD streaming)│  │                      │
+└────────────────┘  └──────────────────────┘
+```
+
+**Why this fits in 16 GB:** the Expert Sniper streams Gemma 4's MoE expert weights from SSD on demand, so the resident set stays under ~3 GB even though the full model is 13 GB. Plus Falcon Perception (1.5 GB) plus macOS overhead = comfortably under the 16 GB ceiling.
+
+### Install (single Mac, from scratch)
+
+Requires Apple Silicon (M1/M2/M3/M4), 16+ GB RAM, ~30 GB free disk.
+
+```bash
+# 1. Clone the repo and install
+git clone https://github.com/walter-grace/mac-code
+cd mac-code/research/expert-sniper/distributed
+python3 -m venv venv && source venv/bin/activate
+pip install -e .
+pip install mlx mlx-vlm fastapi uvicorn pillow huggingface_hub
+
+# 2. Download stock Gemma 4 (one time, ~13 GB)
+huggingface-cli download mlx-community/gemma-4-26b-a4b-it-4bit \
+    --local-dir ~/models/gemma4-source
+
+# 3. Split for SSD streaming (one time, ~5 min)
+python3 split_gemma4.py \
+    --input ~/models/gemma4-source \
+    --output ~/models/gemma4-stream
+# Produces ~/models/gemma4-stream/{pinned.safetensors, bin/layer_XX.bin}
+
+# 4. Falcon Perception downloads automatically on first run
+#    (~1.5 GB, from tiiuae/Falcon-Perception)
+
+# 5. Launch
+python3 -m mac_tensor.cli ui --vision --falcon \
+    --stream-dir ~/models/gemma4-stream \
+    --source-dir ~/models/gemma4-source \
+    --port 8500
+```
+
+Open `http://localhost:8500` in a browser. You should see the chat interface. Drop an image, ask Gemma to describe it, then click **Ground** to have Falcon outline the object precisely.
+
+### Three modes — pick the right flag
+
+| Flag combo | What loads | RAM resident | Use for |
+|---|---|---|---|
+| `--vision --falcon` | Gemma 4 + Falcon | ~5 GB | The full vision agent (chat UI + grounded segmentation) |
+| `--vision` | Gemma 4 only | ~3 GB | Vision chat without segmentation |
+| `--falcon-only` | Falcon only, **no Gemma** | ~1.5 GB | Batch labeling pipelines that only need `/api/falcon` |
+| `--nodes …` | distributed text-only | ~1.5 GB coordinator | Multi-Mac MoE chat (the original sniper use case) |
+
+### REST endpoints exposed
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/info` | GET | Returns `{model, vision, falcon, swarm_leader}` so clients can detect capabilities |
+| `/api/chat_vision` | POST (multipart) | Chained Gemma → Falcon vision agent. Streams SSE events. |
+| `/api/falcon` | POST (multipart) | Direct Falcon grounding. Returns `{count, masks, annotated_image (base64 PNG)}` |
+| `/api/turbo_chat` | POST (multipart) | Gemma vision encode + Qwen 3 1.7B reasoning chain (requires `--turbo-url`) |
+
+### Verified hardware
+
+| Mac | Wall time first response | Cold start | Notes |
+|---|---|---|---|
+| **M4 Mac Mini, 16 GB** | ~14s for first vision call | ~30s loading Gemma + Falcon | Confirmed working at `192.168.1.244:8500` |
+
 ## Install
 
 ```bash
