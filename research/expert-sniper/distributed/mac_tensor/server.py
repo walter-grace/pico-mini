@@ -86,6 +86,10 @@ def run_server(model_key, node_urls=None, host="0.0.0.0", port=8500, allow_write
     if vision:
         model_label = "Gemma 4-26B-A4B (Vision)"
         node_count_label = "single Mac · vision enabled"
+    elif swarm_leader:
+        model_label = {"gemma4": "Gemma 4-26B-A4B",
+                       "qwen35": "Qwen 3.5-35B-A3B"}.get(model_key, model_key)
+        node_count_label = "swarm leader · waiting for peers"
     else:
         model_label = {"gemma4": "Gemma 4-26B-A4B",
                        "qwen35": "Qwen 3.5-35B-A3B"}.get(model_key, model_key)
