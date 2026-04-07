@@ -104,8 +104,21 @@ class VisionGemma4Sniper:
         vc = VisionConfig.from_dict(vision_config_dict)
         self.vision_tower = VisionModel(vc)
 
+        # Find safetensors files — accept both the original sharded format
+        # and the extracted standalone vision.safetensors
+        safetensors_files = sorted(glob.glob(os.path.join(self.source_dir, "model-*.safetensors")))
+        if not safetensors_files:
+            standalone = os.path.join(self.source_dir, "vision.safetensors")
+            if os.path.exists(standalone):
+                safetensors_files = [standalone]
+        if not safetensors_files:
+            raise FileNotFoundError(
+                f"No safetensors files found in {self.source_dir}. "
+                f"Expected either model-*.safetensors or vision.safetensors"
+            )
+
         vision_weights = {}
-        for sf in sorted(glob.glob(os.path.join(self.source_dir, "model-*.safetensors"))):
+        for sf in safetensors_files:
             w = mx.load(sf)
             for k, v in w.items():
                 if k.startswith("vision_tower."):
@@ -124,7 +137,7 @@ class VisionGemma4Sniper:
         nn.quantize(self.embed_vision, group_size=64, bits=4)
 
         ev_weights = {}
-        for sf in sorted(glob.glob(os.path.join(self.source_dir, "model-*.safetensors"))):
+        for sf in safetensors_files:  # reuse the same files
             w = mx.load(sf)
             for k, v in w.items():
                 if k.startswith("embed_vision."):
