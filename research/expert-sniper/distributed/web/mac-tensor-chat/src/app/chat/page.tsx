@@ -37,6 +37,9 @@ type Message = {
   imageDataUrl?: string;
   toolCalls: { tool: string; args: string; result: string }[];
   falcon?: FalconResult;
+  // For animated mask reveal — image to overlay boxes onto + which masks are visible so far
+  groundedImage?: string;
+  revealedCount?: number;
 };
 
 export default function ChatPage() {
@@ -236,8 +239,9 @@ export default function ChatPage() {
       imageDataUrl,
       toolCalls: [],
     };
+    const placeholderId = crypto.randomUUID();
     const placeholderMsg: Message = {
-      id: crypto.randomUUID(),
+      id: placeholderId,
       role: "falcon",
       text: "Running Falcon Perception...",
       toolCalls: [],
@@ -256,18 +260,32 @@ export default function ChatPage() {
         throw new Error(err.error || `HTTP ${res.status}`);
       }
       const data: FalconResult = await res.json();
-      setMessages((m) => {
-        const next = [...m];
-        const last = next[next.length - 1];
-        if (last && last.role === "falcon") {
-          next[next.length - 1] = {
-            ...last,
-            text: `Found ${data.count} ${data.count === 1 ? "instance" : "instances"} of "${query}" in ${data.elapsed_seconds}s`,
-            falcon: data,
-          };
-        }
-        return next;
-      });
+
+      // Set the falcon result with revealedCount=0 (no masks visible yet)
+      setMessages((m) =>
+        m.map((msg) =>
+          msg.id === placeholderId
+            ? {
+                ...msg,
+                text: `Found ${data.count} ${data.count === 1 ? "instance" : "instances"} of "${query}" in ${data.elapsed_seconds}s`,
+                falcon: data,
+                groundedImage: imageDataUrl,
+                revealedCount: 0,
+              }
+            : msg,
+        ),
+      );
+
+      // Animate masks appearing one by one, 350ms apart
+      const total = data.masks.length;
+      for (let i = 1; i <= total; i++) {
+        await new Promise((r) => setTimeout(r, 350));
+        setMessages((m) =>
+          m.map((msg) =>
+            msg.id === placeholderId ? { ...msg, revealedCount: i } : msg,
+          ),
+        );
+      }
     } catch (e: unknown) {
       const msg = e instanceof Error ? e.message : String(e);
       setMessages((m) => {
@@ -411,37 +429,123 @@ export default function ChatPage() {
                   </div>
                   {m.falcon && (
                     <div className="mt-3">
+                      {/* Live-labeled image: original image as backdrop, bbox overlays animate in one by one */}
                       <div className="relative inline-block">
                         {/* eslint-disable-next-line @next/next/no-img-element */}
                         <img
-                          src={m.falcon.annotated_image}
-                          alt="annotated"
-                          className="max-w-full rounded-lg border border-orange-500/40"
+                          src={m.groundedImage || m.falcon.annotated_image}
+                          alt="grounded"
+                          className="block max-w-full rounded-lg border border-orange-500/40"
+                          style={{ maxHeight: 480 }}
                         />
-                        <a
-                          href={m.falcon.annotated_image}
-                          download={`falcon-${m.falcon.query.replace(/\s+/g, "_")}.png`}
-                          className="absolute right-2 top-2 rounded-md border border-white/30 bg-black/70 px-2 py-1 text-xs text-white hover:bg-black/90"
-                        >
-                          ⬇ Download
-                        </a>
-                      </div>
-                      {m.falcon.masks.length > 0 && (
-                        <div className="mt-3 space-y-1 text-xs text-slate-400">
-                          {m.falcon.masks.map((mask) => {
-                            const cx = (mask.centroid_norm.x * 100).toFixed(0);
-                            const cy = (mask.centroid_norm.y * 100).toFixed(0);
-                            const area = (mask.area_fraction * 100).toFixed(1);
+                        {/* Overlay each revealed mask as a positioned bbox */}
+                        {m.falcon.masks
+                          .slice(0, m.revealedCount ?? m.falcon.masks.length)
+                          .map((mask, i) => {
+                            const colors = [
+                              "#22d3ee",
+                              "#f472b6",
+                              "#fb923c",
+                              "#34d399",
+                              "#a78bfa",
+                              "#fbbf24",
+                              "#f87171",
+                              "#60a5fa",
+                            ];
+                            const color = colors[i % colors.length];
+                            const x1 = mask.bbox_norm.x1 * 100;
+                            const y1 = mask.bbox_norm.y1 * 100;
+                            const w = (mask.bbox_norm.x2 - mask.bbox_norm.x1) * 100;
+                            const h = (mask.bbox_norm.y2 - mask.bbox_norm.y1) * 100;
                             return (
-                              <div key={mask.id}>
-                                <span className="text-orange-400">
-                                  #{mask.id}
-                                </span>{" "}
-                                — {mask.image_region}, center ({cx}%, {cy}%),
-                                area {area}%
+                              <div
+                                key={mask.id}
+                                className="absolute pointer-events-none"
+                                style={{
+                                  left: `${x1}%`,
+                                  top: `${y1}%`,
+                                  width: `${w}%`,
+                                  height: `${h}%`,
+                                  border: `3px solid ${color}`,
+                                  borderRadius: 6,
+                                  backgroundColor: `${color}22`,
+                                  boxShadow: `0 0 16px ${color}88`,
+                                  animation: `falconMaskFadeIn 250ms ease-out`,
+                                }}
+                              >
+                                <div
+                                  className="absolute -top-7 left-0 rounded px-2 py-1 text-xs font-bold text-white"
+                                  style={{
+                                    backgroundColor: color,
+                                    boxShadow: `0 2px 8px ${color}88`,
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  #{mask.id} {mask.image_region}
+                                </div>
                               </div>
                             );
                           })}
+                        {/* Download link (only when reveal is complete) */}
+                        {(m.revealedCount ?? 0) >= m.falcon.masks.length && (
+                          <a
+                            href={m.falcon.annotated_image}
+                            download={`falcon-${m.falcon.query.replace(/\s+/g, "_")}.png`}
+                            className="absolute right-2 top-2 rounded-md border border-white/30 bg-black/70 px-2 py-1 text-xs text-white hover:bg-black/90"
+                          >
+                            ⬇ Download
+                          </a>
+                        )}
+                      </div>
+
+                      {/* Reveal progress + per-mask details */}
+                      {m.falcon.masks.length > 0 && (
+                        <div className="mt-3">
+                          <div className="text-xs text-slate-500">
+                            {(m.revealedCount ?? m.falcon.masks.length) <
+                            m.falcon.masks.length
+                              ? `Labeling: ${m.revealedCount ?? 0}/${m.falcon.masks.length}...`
+                              : `${m.falcon.masks.length} ${m.falcon.masks.length === 1 ? "instance" : "instances"} labeled`}
+                          </div>
+                          <div className="mt-2 space-y-1 text-xs text-slate-400">
+                            {m.falcon.masks
+                              .slice(0, m.revealedCount ?? m.falcon.masks.length)
+                              .map((mask, i) => {
+                                const colors = [
+                                  "#22d3ee",
+                                  "#f472b6",
+                                  "#fb923c",
+                                  "#34d399",
+                                  "#a78bfa",
+                                  "#fbbf24",
+                                  "#f87171",
+                                  "#60a5fa",
+                                ];
+                                const color = colors[i % colors.length];
+                                const cx = (mask.centroid_norm.x * 100).toFixed(0);
+                                const cy = (mask.centroid_norm.y * 100).toFixed(0);
+                                const area = (mask.area_fraction * 100).toFixed(1);
+                                return (
+                                  <div
+                                    key={mask.id}
+                                    className="flex items-center gap-2"
+                                    style={{
+                                      animation: "falconMaskFadeIn 200ms ease-out",
+                                    }}
+                                  >
+                                    <span
+                                      className="inline-block h-3 w-3 rounded-sm"
+                                      style={{ backgroundColor: color }}
+                                    />
+                                    <span style={{ color }}>#{mask.id}</span>
+                                    <span>
+                                      {mask.image_region}, center ({cx}%, {cy}%),
+                                      area {area}%
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                          </div>
                         </div>
                       )}
                     </div>

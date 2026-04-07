@@ -24,3 +24,19 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Animation for Falcon Perception masks appearing one by one */
+@keyframes falconMaskFadeIn {
+  0% {
+    opacity: 0;
+    transform: scale(1.15);
+  }
+  60% {
+    opacity: 1;
+    transform: scale(0.97);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
