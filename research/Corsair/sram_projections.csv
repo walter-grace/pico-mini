@@ -1,0 +1,10 @@
+scenario,model,total_params_B,active_params_B,num_experts,top_k,quant,model_size_gb,expert_size_mb,live_experts_pct,live_expert_data_gb,hardware,compute_memory,storage_memory,compute_bandwidth,storage_bandwidth,expert_load_time_us,projected_tok_s,bottleneck,notes
+Mac Mini M4 (measured),Qwen3.5-35B-A3B,35,3,256,8,4-bit,20.5,1.69,54.8%,9.0,Apple M4 16GB,16 GB unified,NVMe SSD,100 GB/s,3-5 GB/s,400,6.41,SSD bandwidth,F_NOCACHE+pread+LRU+routing_bias=1.5
+Mac Mini M4 (measured),Gemma4-26B-A4B,26,4,128,8,8-bit,26.8,3.3,~55%,14.7,Apple M4 16GB,16 GB unified,NVMe SSD,100 GB/s,3-5 GB/s,800,4.28,SSD bandwidth,F_NOCACHE+pread+LRU+routing_bias=1.5
+Mac Mini M4 (measured),Qwen3.5-122B-A10B,122,10,256,8,IQ1_M,32.0,~0.5,~55%,7.0,Apple M4 16GB,16 GB unified,NVMe SSD,100 GB/s,3-5 GB/s,100,2.65,SSD+swap,stock llama.cpp mmap
+Mac Mini M4 (measured),Qwen3.5-397B-A17B,397,17,512,10,IQ1_M,100.0,~0.3,~55%,15.0,Apple M4 16GB,16 GB unified,NVMe SSD,100 GB/s,3-5 GB/s,60,0.10,massive swap,stock llama.cpp mmap - 6.2x oversubscription
+Corsair 1-card (projected),Qwen3.5-35B-A3B,35,3,256,8,MXINT4,20.5,1.69,54.8%,9.0,d-Matrix Corsair,2 GB SRAM,256 GB LPDDR5,150 TB/s,400 GB/s,0.01,500+,compute,150TB/s SRAM = instant expert loads
+Corsair 1-card (projected),Gemma4-26B-A4B,26,4,128,8,MXINT8,26.8,3.3,~55%,14.7,d-Matrix Corsair,2 GB SRAM,256 GB LPDDR5,150 TB/s,400 GB/s,0.008,400+,compute,live experts fit in SRAM (14.7 GB > 2 GB = use LPDDR5)
+Corsair 1-card (projected),Qwen3.5-122B-A10B,122,10,256,8,MXINT4,~40,~1.2,~55%,21.0,d-Matrix Corsair,2 GB SRAM,256 GB LPDDR5,150 TB/s,400 GB/s,0.003,300+,LPDDR5 bandwidth,experts in LPDDR5 at 400 GB/s
+Corsair 8-card server (projected),Qwen3.5-397B-A17B,397,17,512,10,MXINT4,~100,~0.5,~55%,27.5,d-Matrix 8x Corsair,16 GB SRAM total,2 TB LPDDR5,1.2 PB/s,3.2 TB/s,0.0004,1000+,compute,live working set (27.5 GB) fits in 16 GB SRAM
+Corsair 8-card (projected routing bias),Qwen3.5-397B-A17B,397,17,512,10,MXINT4,~100,~0.5,~55%,27.5,d-Matrix 8x Corsair + Expert Sniper,16 GB SRAM total,2 TB LPDDR5,1.2 PB/s,3.2 TB/s,0.0001,2000+,compute,routing bias keeps 97% in SRAM = near-zero LPDDR5 fetches

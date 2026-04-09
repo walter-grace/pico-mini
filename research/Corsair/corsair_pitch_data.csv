@@ -1,0 +1,14 @@
+metric,measured_value,hardware,corsair_equivalent,corsair_projected,improvement_factor,pitch_relevance
+Expert cache hit rate (no bias),84.1%,M4 Mac Mini,SRAM residency rate,~84%,1x,baseline without routing intelligence
+Expert cache hit rate (bias=1.5),97.1%,M2 Cloud (Gemma 4),SRAM residency rate,~97%,1.15x,routing bias keeps experts in Performance Mode SRAM
+Dead expert percentage,45.2%,Qwen3.5-35B calibration,Wasted SRAM slots,0%,save 45% SRAM,only cache live experts = more room for hot ones
+SSD expert load time,400 us/expert,M4 Mac Mini NVMe,SRAM expert load time,0.01 us/expert,40000x,150 TB/s SRAM vs 3-5 GB/s NVMe
+LPDDR5 expert load time,n/a,n/a,LPDDR5 expert load time,8 us/expert,50x vs NVMe,400 GB/s LPDDR5 for cold experts
+Union-of-experts dedup (K=8),58.1%,real inference Qwen3.5-35B,batch verification savings,58.1%,2.4x fewer loads,same algorithm on Corsair
+Expert working set (Qwen3.5-35B),9.0 GB (live 4-bit),calculated from dead expert analysis,SRAM allocation needed,9.0 GB,fits in 8-card 16 GB SRAM,all live experts in Performance Mode
+Expert working set (397B),~27.5 GB (live IQ1_M),estimated,SRAM allocation needed,27.5 GB,fits in 16-card 32 GB SRAM,needs multi-card for frontier models
+MLX Sniper tok/s (35B 4-bit),6.41,M4 Mac Mini 16 GB,Corsair projected,TBD (compute-bound),expert I/O eliminated,bottleneck shifts from I/O to compute — need Corsair profiling
+MLX Sniper tok/s (Gemma 8-bit),4.28,M4 Cloud 16 GB,Corsair projected,TBD (compute-bound),expert I/O eliminated,same algorithm — throughput depends on Corsair compute pipeline
+Stock llama.cpp tok/s (122B),2.65,M4 Cloud 16 GB,Corsair projected,TBD,expert I/O eliminated,even stock benefits from SRAM bandwidth — need hardware measurement
+Routing bias quality impact,none measured,perplexity validated bias=1.0,quality on Corsair,none expected,0x degradation,bias is conservative enough for production
+Co-activation prefetch accuracy,6 experts/layer,prediction from co-activation matrix,Stash Memory prefetch,6 experts/layer,1x,DMX Link latency ~0.1us enables sub-microsecond prefetch

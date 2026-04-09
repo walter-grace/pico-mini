@@ -1,0 +1,38 @@
+model,quant,size_gb,oversubscription,hardware,ram_gb,engine,routing_bias,tok_s_cold,tok_s_warm,cache_hit_rate,verified,notes
+Qwen3.5-35B-A3B,4-bit,20.5,1.3x,M4 Mac Mini,16,MLX Expert Sniper,1.5,,6.41,90.7%,V,F_NOCACHE+pread+LRU+bias
+Qwen3.5-35B-A3B,4-bit,20.5,1.3x,M4 Mac Mini,16,MLX Expert Sniper,0.0,,5.37,84.1%,V,F_NOCACHE+pread+LRU no bias
+Qwen3.5-35B-A3B,4-bit,20.5,1.3x,M2 Cloud,16,MLX Expert Sniper,0.0,2.90,3.71,84.1%,V,cold/warm variation
+Qwen3.5-35B-A3B,4-bit (Q4_K_M),20.5,1.3x,M2 Cloud,16,Stock llama.cpp,0.0,1.61,3.53,,V,mmap+OS page cache
+Qwen3.5-35B-A3B,4-bit (Q4_K_M),20.5,1.3x,M4 Cloud,16,Stock llama.cpp,0.0,2.94,3.81,,V,mmap+OS page cache
+Qwen3.5-35B-A3B,5-bit,24.8,1.6x,M4 Cloud,16,MLX Expert Sniper,0.0,,3.43,,A,agent tested
+Qwen3.5-35B-A3B,5-bit,24.8,1.6x,M2 Cloud,16,MLX Expert Sniper,0.0,,1.89,,A,agent tested
+Qwen3.5-35B-A3B,5-bit (Q5_K_M),24.8,1.6x,M2 Cloud,16,Stock llama.cpp,0.0,,1.10,,A,agent tested
+Qwen3.5-35B-A3B,6-bit,29.1,1.8x,M4 Cloud,16,MLX Expert Sniper,0.0,,2.17,,A,agent tested
+Qwen3.5-35B-A3B,6-bit,29.1,1.8x,M2 Cloud,16,MLX Expert Sniper,0.0,,1.81,,A,agent tested
+Qwen3.5-35B-A3B,6-bit (Q6_K),29.1,1.8x,M4 Cloud,16,Stock llama.cpp,0.0,0.89,5.55,,V,warm cache very effective
+Qwen3.5-35B-A3B,8-bit,37.7,2.4x,M4 Cloud,16,MLX Expert Sniper,0.0,,1.03,,A,agent tested
+Qwen3.5-35B-A3B,8-bit,37.7,2.4x,M2 Cloud,16,MLX Expert Sniper,0.0,,0.59,,A,agent tested
+Qwen3.5-35B-A3B,8-bit (Q8_0),37.7,2.4x,M2 Cloud,16,Stock llama.cpp,0.0,0.81,1.09,,V,3 queries
+Qwen3.5-35B-A3B,8-bit (Q8_0),37.7,2.4x,M4 Cloud,16,Stock llama.cpp,0.0,,0.87,,A,agent tested
+Qwen3-30B-A3B,4-bit,17.0,1.1x,M2 Cloud,16,MLX Expert Sniper,0.0,,3.25,,A,agent tested
+Qwen3-30B-A3B,4-bit (Q4_K_M),17.0,1.1x,M2 Cloud,16,Stock llama.cpp,0.0,,2.67,,A,agent tested
+Qwen3-30B-A3B,6-bit,25.0,1.6x,M2 Cloud,16,MLX Expert Sniper,1.5,,1.28,91.8%,V,F_NOCACHE+routing bias
+Qwen3-30B-A3B,6-bit,25.0,1.6x,M4 Cloud,16,MLX Expert Sniper,0.0,,1.50,,A,agent tested
+Qwen3-30B-A3B,6-bit (Q6_K),25.0,1.6x,M2 Cloud,16,Stock llama.cpp,0.0,,0.69,,A,agent tested
+Qwen3-30B-A3B,8-bit,33.0,2.0x,M2 Cloud,16,MLX Expert Sniper,1.5,,0.44,91.8%,V,F_NOCACHE+routing bias
+Qwen3-30B-A3B,8-bit,33.0,2.0x,M2 Cloud,16,MLX Expert Sniper,0.0,,0.41,,A,without bias
+Qwen3-30B-A3B,8-bit (Q8_0),33.0,2.0x,M2 Cloud,16,Stock llama.cpp,0.0,,0.57,,V,from session 1
+Gemma4-26B-A4B,4-bit (Q4_K_M),17.0,1.0x,M2 Cloud,16,Stock llama.cpp,0.0,8.60,11.32,,V,fits in RAM
+Gemma4-26B-A4B,4-bit,15.6,1.0x,M2 Cloud,16,MLX Expert Sniper,1.5,,3.84,97.1%,V,sniper overhead when fits
+Gemma4-26B-A4B,8-bit (Q8_0),27.0,1.7x,M2 Cloud,16,Stock llama.cpp,0.0,0.95,1.79,,V,3 queries same machine
+Gemma4-26B-A4B,8-bit (Q8_0),27.0,1.7x,M4 Cloud,16,Stock llama.cpp,0.0,1.22,1.39,,V,3 queries same machine
+Gemma4-26B-A4B,8-bit,26.8,1.7x,M2 Cloud,16,MLX Expert Sniper,1.5,,3.84,97.1%,V,F_NOCACHE+routing bias
+Gemma4-26B-A4B,8-bit,26.8,1.7x,M4 Cloud,16,MLX Expert Sniper,1.5,,4.28,97.1%,V,F_NOCACHE+routing bias
+Qwen3.5-122B-A10B,IQ1_M,32.0,2.0x,M4 Cloud,16,Stock llama.cpp,0.0,,2.65,,V,directly benchmarked
+Qwen3.5-122B-A10B,IQ1_M,32.0,2.0x,M2 Cloud,16,Stock llama.cpp,0.0,,2.32,,V,directly benchmarked
+Qwen3.5-122B-A10B,IQ2_M,39.0,2.4x,M2 Cloud,16,Stock llama.cpp,0.0,,0.33,,V,directly benchmarked
+Qwen3.5-122B-A10B,IQ3_S,43.0,2.7x,M4 Cloud,16,Stock llama.cpp,0.0,,,,V,OOM - failed to load
+Qwen3.5-397B-A17B,IQ1_M,100.0,6.2x,M4 Cloud,16,Stock llama.cpp,0.0,,0.10,,A,agent - coherent output
+Qwen3.5-35B-A3B,Q8_K_XL,45.0,2.8x,M4 Cloud,16,Stock llama.cpp,0.0,,0.75,,A,agent tested
+Qwen3-30B-A3B,Q4_K_M,17.0,1.1x,RTX 4000 Ada,20 VRAM,Stock llama.cpp (GPU),0.0,,104.80,,V,all layers on GPU
+Qwen3-30B-A3B,Q8_0,30.0,1.5x VRAM,RTX 4000 Ada,20 VRAM,Stock llama.cpp (GPU),0.0,,3.11,,V,partial GPU offload -ngl 30
